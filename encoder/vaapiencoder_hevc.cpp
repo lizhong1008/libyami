@@ -1,7 +1,7 @@
 /*
  *  vaapiencoder_hevc.cpp - hevc encoder for va
  *
- *  Copyright (C) 2013-2014 Intel Corporation
+ *  Copyright (C) 2014-2015 Intel Corporation
  *    Author: Wind Yuan <feng.yuan@intel.com>
  *    Author: Xu Guangxin <guangxin.xu@intel.com>
  *    Author: Li Zhong <zhong.li@intel.com>
@@ -34,6 +34,7 @@
 #include "vaapiencpicture.h"
 #include "vaapiencoder_factory.h"
 #include <algorithm>
+#include <cmath>
 #include <tr1/functional>
 namespace YamiMediaCodec{
 //shortcuts
@@ -47,26 +48,16 @@ using std::vector;
 /* Define the maximum IDR period */
 #define MAX_IDR_PERIOD 512
 
+#define HEVC_NAL_START_CODE 0x000001
 
 #define VAAPI_ENCODER_HEVC_NAL_REF_IDC_NONE        0
 #define VAAPI_ENCODER_HEVC_NAL_REF_IDC_LOW         1
 #define VAAPI_ENCODER_HEVC_NAL_REF_IDC_MEDIUM      2
 #define VAAPI_ENCODER_HEVC_NAL_REF_IDC_HIGH        3
 
-typedef enum {
-  VAAPI_ENCODER_HEVC_NAL_UNKNOWN     = 0,
-  VAAPI_ENCODER_HEVC_NAL_NON_IDR     = 1,
-  VAAPI_ENCODER_HEVC_NAL_IDR         = 5,    /* ref_idc != 0 */
-  VAAPI_ENCODER_HEVC_NAL_SEI         = 6,    /* ref_idc == 0 */
-  VAAPI_ENCODER_HEVC_NAL_SPS         = 7,
-  VAAPI_ENCODER_HEVC_NAL_PPS         = 8
-} GstVaapiEncoderHEVCNalType;
-
-static inline bool
-_poc_greater_than (uint32_t poc1, uint32_t poc2, uint32_t max_poc)
-{
-    return (((poc1 - poc2) & (max_poc - 1)) < max_poc / 2);
-}
+#define  VPS_NUT    32
+#define  SPS_NUT    33
+#define  PPS_NUT    34
 
 /* Get slice_type value for H.264 specification */
 static uint8_t
@@ -103,38 +94,15 @@ hevc_get_log2_max_frame_num (uint32_t num)
     return ret;
 }
 
-/* Determines the cpbBrNalFactor based on the supplied profile */
-static uint32_t
-hevc_get_cpb_nal_factor (VaapiProfile profile)
-{
-    uint32_t f;
-
-    /* Table A-2 */
-    switch (profile) {
-    case VAAPI_PROFILE_HEVC_HIGH:
-        f = 1500;
-        break;
-    case VAAPI_PROFILE_HEVC_HIGH10:
-        f = 3600;
-        break;
-    case VAAPI_PROFILE_HEVC_HIGH_422:
-    case VAAPI_PROFILE_HEVC_HIGH_444:
-        f = 4800;
-        break;
-    default:
-        f = 1200;
-        break;
-    }
-    return f;
-}
-
 static uint8_t hevc_get_profile_idc (VaapiProfile profile)
 {
     uint8_t idc;
     switch (profile) {
-    case VAAPI_PROFILE_HEVC_MAIN:
-        idc =  77;
+    case VAProfileHEVCMain:
+        idc =  1;
         break;
+    case VAProfileHEVCMain10:
+        idc = 2;
     default:
         assert(0);
     }
@@ -175,17 +143,21 @@ bit_writer_put_se(BitWriter *bitwriter, int32_t value)
     return TRUE;
 }
 
-
 static BOOL
 bit_writer_write_nal_header(
     BitWriter *bitwriter,
-    uint32_t nal_ref_idc,
     uint32_t nal_unit_type
 )
 {
+    /* forbidden_zero_bit */
     bit_writer_put_bits_uint32(bitwriter, 0, 1);
-    bit_writer_put_bits_uint32(bitwriter, nal_ref_idc, 2);
-    bit_writer_put_bits_uint32(bitwriter, nal_unit_type, 5);
+    /* nal unit_type */
+    bit_writer_put_bits_uint32(bitwriter, nal_unit_type, 6);
+    /* layer_id */
+    bit_writer_put_bits_uint32(bitwriter, 0, 6);
+    /* temporal_id_plus1*/
+    bitstream_put_ui(bitwriter, 1, 3);
+
     return TRUE;
 }
 
@@ -197,294 +169,57 @@ bit_writer_write_trailing_bits(BitWriter *bitwriter)
     return TRUE;
 }
 
-static BOOL
-bit_writer_write_vps (BitWriter *bitwriter)
-{
-
-
-}
-
-
-static BOOL
-bit_writer_write_sps(
+static void profile_tier_level(
     BitWriter *bitwriter,
-    const VAEncSequenceParameterBufferHEVC* const seq,
-    VaapiProfile profile
+    BOOL profile_present_flag,
+    uint32_t max_num_sub_layers,
+    const VAEncSequenceParameterBufferHEVC* const seq
 )
 {
-    uint32_t constraint_set0_flag, constraint_set1_flag;
-    uint32_t constraint_set2_flag, constraint_set3_flag;
-    uint32_t gaps_in_frame_num_value_allowed_flag = 0; // ??
-    BOOL nal_hrd_parameters_present_flag;
+    uinit32_t i;
+    unsigned char vps_general_level_idc = seq->general_level_idc * 3;
 
-    uint32_t b_qpprime_y_zero_transform_bypass = 0;
-    uint32_t residual_color_transform_flag = 0;
-    uint32_t pic_height_in_map_units =
-        (seq->seq_fields.bits.frame_mbs_only_flag ?
-         seq->picture_height_in_mbs : seq->picture_height_in_mbs/2);
-    uint32_t mb_adaptive_frame_field = !seq->seq_fields.bits.frame_mbs_only_flag;
-    uint32_t i = 0;
+    if (profile_present_flag) {
+        /* general_profile_space */
+        bit_writer_put_bits_uint32(bitwriter, 0, 2);
+        /* general_tier_flag */
+        bit_writer_put_bits_uint32(bitwriter, seq->general_tier_flag, 1);
+        /* general_profile_idc */
+        bit_writer_put_bits_uint32(bitwriter, seq->general_profile_idc, 5);
 
-    constraint_set0_flag = profile == VAAPI_PROFILE_HEVC_BASELINE;
-    constraint_set1_flag = profile <= VAAPI_PROFILE_HEVC_MAIN;
-    constraint_set2_flag = 0;
-    constraint_set3_flag = 0;
-
-    bit_writer_write_nal_header (bitwriter,
-                         VAAPI_ENCODER_HEVC_NAL_REF_IDC_HIGH, VAAPI_ENCODER_HEVC_NAL_SPS);
-    /* profile_idc */
-    bit_writer_put_bits_uint32(bitwriter, hevc_get_profile_idc(profile), 8);
-    /* constraint_set0_flag */
-    bit_writer_put_bits_uint32(bitwriter, constraint_set0_flag, 1);
-    /* constraint_set1_flag */
-    bit_writer_put_bits_uint32(bitwriter, constraint_set1_flag, 1);
-    /* constraint_set2_flag */
-    bit_writer_put_bits_uint32(bitwriter, constraint_set2_flag, 1);
-    /* constraint_set3_flag */
-    bit_writer_put_bits_uint32(bitwriter, constraint_set3_flag, 1);
-    /* reserved_zero_4bits */
-    bit_writer_put_bits_uint32(bitwriter, 0, 4);
-    /* level_idc */
-    bit_writer_put_bits_uint32(bitwriter, seq->level_idc, 8);
-    /* seq_parameter_set_id */
-    bit_writer_put_ue(bitwriter, seq->seq_parameter_set_id);
-
-    if (profile == VAAPI_PROFILE_HEVC_HIGH) {
-        /* for high profile */
-        /* chroma_format_idc  = 1, 4:2:0*/
-        bit_writer_put_ue(bitwriter, seq->seq_fields.bits.chroma_format_idc);
-        if (3 == seq->seq_fields.bits.chroma_format_idc) {
-          bit_writer_put_bits_uint32(bitwriter, residual_color_transform_flag, 1);
-        }
-        /* bit_depth_luma_minus8 */
-        bit_writer_put_ue(bitwriter, seq->bit_depth_luma_minus8);
-        /* bit_depth_chroma_minus8 */
-        bit_writer_put_ue(bitwriter, seq->bit_depth_chroma_minus8);
-        /* b_qpprime_y_zero_transform_bypass */
-        bit_writer_put_bits_uint32(bitwriter, b_qpprime_y_zero_transform_bypass, 1);
-        assert(seq->seq_fields.bits.seq_scaling_matrix_present_flag == 0);
-        /*seq_scaling_matrix_present_flag  */
-        bit_writer_put_bits_uint32(bitwriter,
-            seq->seq_fields.bits.seq_scaling_matrix_present_flag, 1);
-
-    #if 0
-        if (seq->seq_fields.bits.seq_scaling_matrix_present_flag) {
-          for (i = 0; i < (seq->seq_fields.bits.chroma_format_idc != 3 ? 8 : 12); i++) {
-            bit_writer_put_bits_uint8(bitwriter, seq->seq_fields.bits.seq_scaling_list_present_flag, 1);
-            if (seq->seq_fields.bits.seq_scaling_list_present_flag) {
-              assert(0);
-              /* FIXME, need write scaling list if seq_scaling_matrix_present_flag ==1*/
-            }
-          }
-        }
-    #endif
-    }
-
-    /* log2_max_frame_num_minus4 */
-    bit_writer_put_ue(bitwriter,
-        seq->seq_fields.bits.log2_max_frame_num_minus4);
-    /* pic_order_cnt_type */
-    bit_writer_put_ue(bitwriter, seq->seq_fields.bits.pic_order_cnt_type);
-
-    if (seq->seq_fields.bits.pic_order_cnt_type == 0) {
-        /* log2_max_pic_order_cnt_lsb_minus4 */
-        bit_writer_put_ue(bitwriter,
-            seq->seq_fields.bits.log2_max_pic_order_cnt_lsb_minus4);
-    } else if (seq->seq_fields.bits.pic_order_cnt_type == 1) {
-        assert(0);
-        bit_writer_put_bits_uint32(bitwriter,
-            seq->seq_fields.bits.delta_pic_order_always_zero_flag, 1);
-        bit_writer_put_se(bitwriter, seq->offset_for_non_ref_pic);
-        bit_writer_put_se(bitwriter, seq->offset_for_top_to_bottom_field);
-        bit_writer_put_ue(bitwriter,
-            seq->num_ref_frames_in_pic_order_cnt_cycle);
-        for ( i = 0; i < seq->num_ref_frames_in_pic_order_cnt_cycle; i++) {
-            bit_writer_put_se(bitwriter, seq->offset_for_ref_frame[i]);
-        }
-    }
-
-    /* num_ref_frames */
-    bit_writer_put_ue(bitwriter, seq->max_num_ref_frames);
-    /* gaps_in_frame_num_value_allowed_flag */
-    bit_writer_put_bits_uint32(bitwriter,
-        gaps_in_frame_num_value_allowed_flag, 1);
-
-    /* pic_width_in_mbs_minus1 */
-    bit_writer_put_ue(bitwriter, seq->picture_width_in_mbs - 1);
-    /* pic_height_in_map_units_minus1 */
-    bit_writer_put_ue(bitwriter, pic_height_in_map_units - 1);
-    /* frame_mbs_only_flag */
-    bit_writer_put_bits_uint32(bitwriter,
-        seq->seq_fields.bits.frame_mbs_only_flag, 1);
-
-    if (!seq->seq_fields.bits.frame_mbs_only_flag) { //ONLY mbs
-        assert(0);
-        bit_writer_put_bits_uint32(bitwriter, mb_adaptive_frame_field, 1);
-    }
-
-    /* direct_8x8_inference_flag */
-    bit_writer_put_bits_uint32(bitwriter, 0, 1);
-    /* frame_cropping_flag */
-    bit_writer_put_bits_uint32(bitwriter, seq->frame_cropping_flag, 1);
-
-    if (seq->frame_cropping_flag) {
-        /* frame_crop_left_offset */
-        bit_writer_put_ue(bitwriter, seq->frame_crop_left_offset);
-        /* frame_crop_right_offset */
-        bit_writer_put_ue(bitwriter, seq->frame_crop_right_offset);
-        /* frame_crop_top_offset */
-        bit_writer_put_ue(bitwriter, seq->frame_crop_top_offset);
-        /* frame_crop_bottom_offset */
-        bit_writer_put_ue(bitwriter, seq->frame_crop_bottom_offset);
-    }
-
-    /* vui_parameters_present_flag */
-    bit_writer_put_bits_uint32(bitwriter, seq->vui_parameters_present_flag, 1);
-    if (seq->vui_parameters_present_flag) {
-        /* aspect_ratio_info_present_flag */
-        bit_writer_put_bits_uint32(bitwriter,
-                                  seq->vui_fields.bits.aspect_ratio_info_present_flag,
-                                  1);
-        if (seq->vui_fields.bits.aspect_ratio_info_present_flag) {
-            bit_writer_put_bits_uint32(bitwriter, seq->aspect_ratio_idc, 8);
-            if (seq->aspect_ratio_idc == 0xFF) {
-                bit_writer_put_bits_uint32(bitwriter, seq->sar_width, 16);
-                bit_writer_put_bits_uint32(bitwriter, seq->sar_height, 16);
-            }
-        }
-
-        /* overscan_info_present_flag */
-        bit_writer_put_bits_uint32(bitwriter, 0, 1);
-        /* video_signal_type_present_flag */
-        bit_writer_put_bits_uint32(bitwriter, 0, 1);
-        /* chroma_loc_info_present_flag */
-        bit_writer_put_bits_uint32(bitwriter, 0, 1);
-
-        /* timing_info_present_flag */
-        bit_writer_put_bits_uint32(bitwriter,
-            seq->vui_fields.bits.timing_info_present_flag, 1);
-        if (seq->vui_fields.bits.timing_info_present_flag) {
-            bit_writer_put_bits_uint32(bitwriter, seq->num_units_in_tick, 32);
-            bit_writer_put_bits_uint32(bitwriter, seq->time_scale, 32);
-            bit_writer_put_bits_uint32(bitwriter, 1, 1); /* fixed_frame_rate_flag */
-        }
-
-        nal_hrd_parameters_present_flag = (seq->bits_per_second > 0 ? TRUE : FALSE);
-        /* nal_hrd_parameters_present_flag */
-        bit_writer_put_bits_uint32(bitwriter, nal_hrd_parameters_present_flag, 1);
-        if (nal_hrd_parameters_present_flag) {
-            /* hrd_parameters */
-            /* cpb_cnt_minus1 */
-            bit_writer_put_ue(bitwriter, 0);
-            bit_writer_put_bits_uint32(bitwriter, 4, 4); /* bit_rate_scale */
-            bit_writer_put_bits_uint32(bitwriter, 6, 4); /* cpb_size_scale */
-
-            for (i = 0; i < 1; ++i) {
-                /* bit_rate_value_minus1[0] */
-                bit_writer_put_ue(bitwriter, seq->bits_per_second/1024- 1);
-                /* cpb_size_value_minus1[0] */
-                bit_writer_put_ue(bitwriter, seq->bits_per_second/1024*8 - 1);
-                /* cbr_flag[0] */
-                bit_writer_put_bits_uint32(bitwriter, 1, 1);
-            }
-            /* initial_cpb_removal_delay_length_minus1 */
-            bit_writer_put_bits_uint32(bitwriter, 23, 5);
-            /* cpb_removal_delay_length_minus1 */
-            bit_writer_put_bits_uint32(bitwriter, 23, 5);
-            /* dpb_output_delay_length_minus1 */
-            bit_writer_put_bits_uint32(bitwriter, 23, 5);
-            /* time_offset_length  */
-            bit_writer_put_bits_uint32(bitwriter, 23, 5);
-        }
-        /* vcl_hrd_parameters_present_flag */
-        bit_writer_put_bits_uint32(bitwriter, 0, 1);
-        if (nal_hrd_parameters_present_flag || 0/*vcl_hrd_parameters_present_flag*/) {
-            /* low_delay_hrd_flag */
+        /* general_profile_compatibility_flag. Only the bit corresponding to profile_idc is set */
+        for (i = 0; i < 32; i++) {
             bit_writer_put_bits_uint32(bitwriter, 0, 1);
         }
-        /* pic_struct_present_flag */
+
+        /* general_progressive_source_flag */
+        bit_writer_put_bits_uint32(bitwriter, 1, 1);
+        /* general_interlaced_source_flag */
         bit_writer_put_bits_uint32(bitwriter, 0, 1);
-        /* bitwriter_restriction_flag */
-        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+        /* general_non_packed_constraint_flag */
+        bitstream_put_ui(bitwriter, 0, 1);
+        /* general_frame_only_constraint_flag */
+        bit_writer_put_bits_uint32(bitwriter, 1, 1);
+
+        /* reserved zero 44bits */
+        bit_writer_put_bits_uint32(bitwriter, 0, 12);
+        bit_writer_put_bits_uint32(bitwriter, 0, 16);
+        bit_writer_put_bits_uint32(bitwriter, 0, 16);
     }
 
-    /* rbsp_trailing_bits */
-    bit_writer_write_trailing_bits(bitwriter);
-    return TRUE;
-}
+    /* general_level_idc */
+    bit_writer_put_bits_uint32(bitwriter, vps_general_level_idc, 8);
 
-static BOOL
-bit_writer_write_pps(
-    BitWriter *bitwriter,
-    const VAEncPictureParameterBufferHEVC* const pic
-)
-{
-    uint32_t num_slice_groups_minus1 = 0;
-    uint32_t pic_init_qs_minus26 = 0;
-    uint32_t redundant_pic_cnt_present_flag = 0;
-
-    bit_writer_write_nal_header (bitwriter,
-                         VAAPI_ENCODER_HEVC_NAL_REF_IDC_HIGH, VAAPI_ENCODER_HEVC_NAL_PPS);
-    /* pic_parameter_set_id */
-    bit_writer_put_ue(bitwriter, pic->pic_parameter_set_id);
-    /* seq_parameter_set_id */
-    bit_writer_put_ue(bitwriter, pic->seq_parameter_set_id);
-    /* entropy_coding_mode_flag */
-    bit_writer_put_bits_uint32(bitwriter,
-        pic->pic_fields.bits.entropy_coding_mode_flag, 1);
-    /* pic_order_present_flag */
-    bit_writer_put_bits_uint32(bitwriter,
-        pic->pic_fields.bits.pic_order_present_flag, 1);
-    /*slice_groups-1*/
-    bit_writer_put_ue(bitwriter, num_slice_groups_minus1);
-
-    if (num_slice_groups_minus1 > 0) {
-        /*FIXME*/
-        assert(0);
-    }
-    bit_writer_put_ue(bitwriter, pic->num_ref_idx_l0_active_minus1);
-    bit_writer_put_ue(bitwriter, pic->num_ref_idx_l1_active_minus1);
-    bit_writer_put_bits_uint32(bitwriter,
-        pic->pic_fields.bits.weighted_pred_flag, 1);
-    bit_writer_put_bits_uint32(bitwriter,
-        pic->pic_fields.bits.weighted_bipred_idc, 2);
-    /* pic_init_qp_minus26 */
-    bit_writer_put_se(bitwriter, pic->pic_init_qp-26);
-    /* pic_init_qs_minus26 */
-    bit_writer_put_se(bitwriter, pic_init_qs_minus26);
-    /*chroma_qp_index_offset*/
-    bit_writer_put_se(bitwriter, pic->chroma_qp_index_offset);
-
-    bit_writer_put_bits_uint32(bitwriter,
-        pic->pic_fields.bits.deblocking_filter_control_present_flag, 1);
-    bit_writer_put_bits_uint32(bitwriter,
-        pic->pic_fields.bits.constrained_intra_pred_flag, 1);
-    bit_writer_put_bits_uint32(bitwriter, redundant_pic_cnt_present_flag, 1);
-
-    /*more_rbsp_data*/
-    bit_writer_put_bits_uint32(bitwriter,
-        pic->pic_fields.bits.transform_8x8_mode_flag, 1);
-    bit_writer_put_bits_uint32(bitwriter,
-        pic->pic_fields.bits.pic_scaling_matrix_present_flag, 1);
-    if (pic->pic_fields.bits.pic_scaling_matrix_present_flag) {
-        assert(0);
-        /* FIXME */
-        /*
-        for (i = 0; i <
-            (6+(-( (chroma_format_idc ! = 3) ? 2 : 6) * -pic->pic_fields.bits.transform_8x8_mode_flag));
-            i++) {
-            bit_writer_put_bits_uint8(bitwriter, pic->pic_fields.bits.pic_scaling_list_present_flag, 1);
-        }
+    if (max_num_sub_layers) {
+        /* Max layer is zero. and sub layer info is not present
+        * if it can support multi layers, the sub layer info should be present.
+        * TBD
         */
     }
-
-    bit_writer_put_se(bitwriter, pic->second_chroma_qp_index_offset);
-    bit_writer_write_trailing_bits(bitwriter);
-
-    return TRUE;
 }
 
-class VaapiEncStreamHeaderHEVC
+
+class VaapiEncStreamHeaderHEVC :public VaapiEncoderHEVC
 {
     typedef std::vector<uint8_t> Header;
 public:
@@ -518,13 +253,19 @@ public:
         bit_writer_clear (&bs, TRUE);
     }
 
-    void generateCodecConfig(bool isAVCc)
+    void generateCodecConfig()
     {
+        std::vector<Header*> headers;
+
         ASSERT(m_sps.size() && (m_sps.size() > 4)&& m_pps.size() && m_headers.empty());
-        if (isAVCc)
-            generateCodecConfigAVCc();
-        else
-            generateCodecConfigAnnexB();
+
+        headers.push_back(&m_sps);
+        headers.push_back(&m_pps);
+        uint8_t sync[] = {0, 0, 0, 1};
+        for (int i = 0; i < headers.size(); i++) {
+            m_headers.insert(m_headers.end(), sync, sync + N_ELEMENTS(sync));
+            appendHeaderWithEmulation(*headers[i]);
+        }
     }
 
     Encode_Status getCodecConfig(VideoEncOutputBuffer *outBuffer)
@@ -540,7 +281,337 @@ public:
         return ENCODE_SUCCESS;
     }
 private:
-    static void bsToHeader(Header& param, BitWriter& bs)
+    BOOL bit_writer_write_vps (
+        BitWriter *bitwriter,
+        const VAEncSequenceParameterBufferHEVC* const seq,
+        VaapiProfile profile
+    )
+    {
+        BOOL vps_timing_info_present_flag = 0;
+
+        /* nal_start_code */
+        bit_writer_put_bits_uint32(bitwriter, HEVC_NAL_START_CODE, 24);
+
+        bit_writer_write_nal_header(bitwriter, VPS_NUT);
+
+        /* vps_video_parameter_set_id */
+        bit_writer_put_bits_uint32(bitwriter, 0, 4);
+        /* vps_base_layer_internal_flag */
+        bit_writer_put_bits_uint32(bitwriter, 1, 1);
+        /* vps_base_layer_available_flag */
+        bit_writer_put_bits_uint32(bitwriter, 1, 1);
+        /* vps_max_layers_minus1 */
+        bit_writer_put_bits_uint32(bitwriter, 0, 6);
+        /* vps_max_sub_layers_minus1 */
+        bit_writer_put_bits_uint32(bitwriter, 0, 3);
+        /* vps_temporal_id_nesting_flag */
+        bit_writer_put_bits_uint32(bitwriter, 1, 1);
+
+        /* vps_reserved_0xffff_16bits */
+        bit_writer_put_bits_uint32(bitwriter, 0xffff, 16);
+
+        profile_tier_level(bitwriter, 1, 0, seq);
+
+        /* vps_sub_layer_ordering_info_present_flag */
+        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+
+        /* vps_max_layer_id */
+        bit_writer_put_bits_uint32(bitwriter, 0, 6);
+
+        /* vps_num_layer_sets_minus1 */
+        bit_writer_put_ue(bitwriter, 0);
+
+        /* vps_timing_info_present_flag */
+        bit_writer_put_bits_uint32(bitwriter, vps_timing_info_present_flag, 1);
+
+        if (vps_timing_info_present_flag) {
+            /* TBD: add it later for BRC */
+        }
+
+        /* vps_extension_flag */
+        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+
+        /* rbsp_trailing_bits */
+        bit_writer_write_trailing_bits(bitwriter);
+
+    }
+
+    void st_ref_pic_set(BitWriter *bs, int stRpsIdx, int refIdx, shortRFS* const shortRFS)
+    {
+        int i,j;
+        if (stRpsIdx)
+            bit_writer_put_bits_uint32(bs, shortRFS->inter_ref_pic_set_prediction_flag, 1);
+
+        if (shortRFS->inter_ref_pic_set_prediction_flag)
+        {
+#if 0
+            if (stRpsIdx == ps->num_short_term_ref_pic_sets)
+                bitstream_put_ue(bs, ps->delta_idx_minus1);
+
+            bitstream_put_ui(bs, ps->delta_rps_sign, 1);
+            bitstream_put_ue(bs, ps->abs_delta_rps_minus1);
+
+            for (j = 0; j <= ps->NumDeltaPocs[RefRpsIdx]; j++)
+            {
+                bitstream_put_ui(bs, ps->used_by_curr_pic_flag[j], 1);
+
+                if(!ps->used_by_curr_pic_flag[j])
+                    bitstream_put_ui(bs, ps->use_delta_flag[j], 1);
+            }
+#endif
+        } else {
+            bit_writer_put_ue(bs, shortRFS->num_negative_pics);
+            bit_writer_put_ue(bs, shortRFS->num_positive_pics[refIdx==0?0:1]);
+
+            for (i = 0; i < shortRFS->num_negative_pics; i++)
+            {
+                bit_writer_put_ue(bs, shortRFS->delta_poc_s0_minus1[i]);
+                bit_writer_put_bits_uint32(bs, shortRFS->used_by_curr_pic_s0_flag[i], 1);
+            }
+            for (i = 0; i < shortRFS->num_positive_pics[refIdx==0?0:1]; i++)
+            {
+                bit_writer_put_ue(bs, shortRFS->delta_poc_s1_minus1[i]);
+                bit_writer_put_bits_uint32(bs, shortRFS->used_by_curr_pic_s1_flag[i], 1);
+            }
+        }
+
+        return;
+    }
+
+    BOOL bit_writer_write_sps(
+        BitWriter *bitwriter,
+        const VAEncSequenceParameterBufferHEVC* const seq,
+        shortRFS* const shortRFS,
+        VaapiProfile profile
+    )
+    {
+        uint32_t i = 0;
+        bool conf_win_flag = false;
+        uinit32_t conf_win_left_offset = 0, conf_win_right_offset = 0;
+        uinit32_t conf_win_top_offset = 0, conf_win_bottom_offset = 0;
+
+        /* nal_start_code */
+        bit_writer_put_bits_uint32(bitwriter, HEVC_NAL_START_CODE, 24);
+
+        bit_writer_write_nal_header(bitwriter, SPS_NUT);
+
+        /* sps_video_parameter_set_id */
+        bit_writer_put_bits_uint32(bitwriter, 0, 4);
+        /* sps_max_sub_layers_minus1 */
+        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+        /* sps_temporal_id_nesting_flag */
+        bit_writer_put_bits_uint32(bitwriter, 1, 1);
+
+        profile_tier_level(bitwriter, 1, 0, seq);
+
+        /* seq_parameter_set_id */
+        bit_writer_put_ue(bitwriter, seq->seq_parameter_set_id);
+        /* chroma_format_idc: only support 4:2:0 for libva */
+        bit_writer_put_ue(bitwriter, seq->seq_fields.bits.chroma_format_idc);
+        if (3 == seq->seq_fields.bits.chroma_format_idc) {
+            bit_writer_put_bits_uint32(bitwriter, seq->seq_fields.bits.separate_colour_plane_flag, 1);
+        }
+        /* pic_width_in_luma_samples */
+        bit_writer_put_ue(bitwriter, seq->pic_width_in_luma_samples);
+        /* pic_height_in_luma_samples */
+        bit_writer_put_ue(bitwriter, seq->pic_height_in_luma_samples);
+
+        /* conformance_window_flag */
+        bit_writer_put_bits_uint32(bitwriter, m_confWinFlag, 1);
+
+        if (conf_win_flag) {
+            bit_writer_put_ue(bitwriter, m_confWinLeftOffset);
+            bit_writer_put_ue(bitwriter, m_confWinRightOffset);
+            bit_writer_put_ue(bitwriter, m_confWinTopOffset);
+            bit_writer_put_ue(bitwriter, m_confWinBottomOffset);
+        }
+
+        /* bit_depth_luma_minus8 */
+        bitstream_put_ue(bitwriter, seq->seq_fields.bits.bit_depth_luma_minus8);
+        /* bit_depth_chroma_minus8 */
+        bitstream_put_ue(bitwriter, seq->seq_fields.bits.bit_depth_chroma_minus8);
+
+        /* log2_max_pic_order_cnt_lsb_minus4 */
+        assert(m_log2MaxPicOrderCnt >= 4);
+        bit_writer_put_ue(bitwriter, m_log2MaxPicOrderCnt - 4);
+
+        /* sps_sub_layer_ordering_info_present_flag */
+        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+
+        bit_writer_put_ue(bitwriter, seq->log2_min_luma_coding_block_size_minus3);
+        bit_writer_put_ue(bitwriter, seq->log2_diff_max_min_luma_coding_block_size);
+        bit_writer_put_ue(bitwriter, seq->log2_min_transform_block_size_minus2);
+        bit_writer_put_ue(bitwriter, seq->log2_diff_max_min_transform_block_size);
+        bit_writer_put_ue(bitwriter, seq->max_transform_hierarchy_depth_inter);
+        bit_writer_put_ue(bitwriter, seq->max_transform_hierarchy_depth_intra);
+
+        /* scaling_list_enabled_flag */
+        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+        /* amp_enabled_flag */
+        bit_writer_put_bits_uint32(bitwriter, seq->seq_fields.bits.amp_enabled_flag, 1);
+        /* sample_adaptive_offset_enabled_flag */
+        bit_writer_put_bits_uint32(bitwriter, seq->seq_fields.bits.sample_adaptive_offset_enabled_flag, 1);
+        /* pcm_enabled_flag */
+        bit_writer_put_bits_uint32(bitwriter, seq->seq_fields.bits.pcm_enabled_flag, 1);
+
+        if (seq->seq_fields.bits.pcm_enabled_flag) {
+            /* pcm_sample_bit_depth_luma_minus1 */
+            bit_writer_put_bits_uint32(bitwriter, seq->pcm_sample_bit_depth_luma_minus1, 4);
+            /* pcm_sample_bit_depth_luma_minus1 */
+            bit_writer_put_bits_uint32(bitwriter, seq->pcm_sample_bit_depth_chroma_minus1, 4);
+            /* log2_min_pcm_luma_coding_block_size_minus3 */
+            bit_writer_put_bits_uint32(bitwriter, seq->log2_min_pcm_luma_coding_block_size_minus3);
+            /* log2_diff_max_min_pcm_luma_coding_block_size */
+            bit_writer_put_bits_uint32(bitwriter, seq->log2_max_pcm_luma_coding_block_size_minus3 - seq->log2_min_pcm_luma_coding_block_size_minus3);
+            /* pcm_loop_filter_disabled_flag */
+            bit_writer_put_bits_uint32(bitwriter, seq->seq_fields.bits.pcm_loop_filter_disabled_flag, 1);
+        }
+
+        bit_writer_put_ue(bitwriter, shortRFS.num_short_term_ref_pic_sets);
+        for (i = 0; i < shortRFS.num_short_term_ref_pic_sets; i++)
+            st_ref_pic_set(bitwriter, i, i, shortRFS);
+
+        /* long_term_ref_pics_present_flag */
+        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+
+        bit_writer_put_bits_uint32(bitwriter, seq->seq_fields.bits.strong_intra_smoothing_enabled_flag, 1);
+
+        /* vui_parameters_present_flag */
+        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+
+        /* sps_extension_present_flag */
+        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+
+        /* rbsp_trailing_bits */
+        bit_writer_write_trailing_bits(bitwriter);
+        return TRUE;
+    }
+
+    BOOL bit_writer_write_pps(
+        BitWriter *bitwriter,
+        const VAEncPictureParameterBufferHEVC* const pic
+    )
+    {
+        uint32_t deblocking_filter_control_present_flag  = 1;
+
+        /* nal_start_code */
+        bit_writer_put_bits_uint32(bitwriter, HEVC_NAL_START_CODE, 24);
+
+        bit_writer_write_nal_header(bitwriter, PPS_NUT);
+
+        /* pps_pic_parameter_set_id */
+        bit_writer_put_ue(bitwriter, 0);
+        /* pps_seq_parameter_set_id */
+        bit_writer_put_ue(bitwriter, 0);
+
+        /* dependent_slice_segments_enabled_flag */
+        bit_writer_put_bits_uint32(bitwriter, pic->pic_fields.bits.dependent_slice_segments_enabled_flag, 1);
+
+        /* output_flag_present_flag */
+        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+
+        /* num_extra_slice_header_bits */
+        bit_writer_put_bits_uint32(bitwriter, 0, 3);
+
+        /* sign_data_hiding_enabled_flag */
+        bit_writer_put_bits_uint32(bitwriter, pic->pic_fields.bits.sign_data_hiding_enabled_flag, 1);
+
+        /* cabac_init_present_flag */
+        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+
+        bit_writer_put_ue(bitwriter, pic->num_ref_idx_l0_default_active_minus1);
+        bit_writer_put_ue(bitwriter, pic->num_ref_idx_l1_default_active_minus1);
+
+        /* init_qp_minus26 */
+        bit_writer_put_se(bitwriter, pic->pic_init_qp-26);
+
+        /* constrained_intra_pred_flag */
+        bit_writer_put_bits_uint32(bitwriter, pic->pic_fields.bits.constrained_intra_pred_flag, 1);
+
+        /* transform_skip_enabled_flag */
+        bit_writer_put_bits_uint32(bitwriter, pic->pic_fields.bits.transform_skip_enabled_flag, 1);
+
+        /* cu_qp_delta_enabled_flag */
+        bit_writer_put_bits_uint32(bitwriter, pic->pic_fields.bits.cu_qp_delta_enabled_flag, 1);
+
+        if (pic->pic_fields.bits.cu_qp_delta_enabled_flag) {
+            /* diff_cu_qp_delta_depth */
+            bit_writer_put_ue(bitwriter, pic->diff_cu_qp_delta_depth);
+        }
+
+        /* pps_cb_qp_offset */
+        bit_writer_put_se(bitwriter, pic->pps_cb_qp_offset);
+
+        /* pps_cr_qp_offset */
+        bit_writer_put_se(bitwriter, pic->pps_cr_qp_offset);
+
+        /* pps_slice_chroma_qp_offsets_present_flag */
+        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+
+
+        /* weighted_pred_flag */
+        bit_writer_put_bits_uint32(bitwriter, pic->pic_fields.bits.weighted_pred_flag, 1);
+
+        /* weighted_bipred_flag */
+        bit_writer_put_bits_uint32(bitwriter, pic->pic_fields.bits.weighted_bipred_flag, 1);
+
+        /* transquant_bypass_enabled_flag */
+        bit_writer_put_bits_uint32(bitwriter, pic->pic_fields.bits.transquant_bypass_enabled_flag, 1);
+
+        /* tiles_enabled_flag */
+        bit_writer_put_bits_uint32(bitwriter, pic->pic_fields.bits.tiles_enabled_flag, 1);
+
+        /* entropy_coding_sync_enabled_flag */
+        bit_writer_put_bits_uint32(bitwriter, pic->pic_fields.bits.entropy_coding_sync_enabled_flag, 1);
+
+        if (pic->pic_fields.bits.tiles_enabled_flag) {
+            /*
+            * TBD: Add the tile division when tiles are enabled.
+            */
+            assert(!pic->pic_fields.bits.tiles_enabled_flag);
+        }
+
+        /* pps_loop_filter_across_slices_enabled_flag */
+        bit_writer_put_bits_uint32(bitwriter, pic->pic_fields.bits.loop_filter_across_tiles_enabled_flag, 1);
+
+        /* deblocking_filter_control_present_flag. 1 */
+        bit_writer_put_bits_uint32(bitwriter, deblocking_filter_control_present_flag, 1);
+        if (deblocking_filter_control_present_flag) {
+            /* deblocking_filter_override_enabled_flag */
+            bit_writer_put_bits_uint32(bitwriter, 1, 1);
+            /* pps_deblocking_filter_disabled_flag */
+            bit_writer_put_bits_uint32(bitwriter, 1, 1);
+        }
+
+        /* scaling_list_data_present_flag */
+        bit_writer_put_bits_uint32(bitwriter, pic->pic_fields.bits.scaling_list_data_present_flag, 1);
+
+        if (pic->pic_fields.bits.scaling_list_data_present_flag) {
+            /*
+            * TBD: Add the scaling list data for PPS
+            */
+            assert(!pic->pic_fields.bits.scaling_list_data_present_flag);
+        }
+
+        /* lists_modification_present_flag 0/1 ?*/
+        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+
+        /* log2_parallel_merge_level_minus2: 2 - 2 */
+        bit_writer_put_ue(bitwriter, 0);
+
+        /* slice_segment_header_extension_present_flag. Zero */
+        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+
+        /* pps_extension_flag */
+        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+
+        bit_writer_write_trailing_bits(bitwriter);
+
+        return TRUE;
+    }
+
+
+    void bsToHeader(Header& param, BitWriter& bs)
     {
         ASSERT(BIT_WRITER_BIT_SIZE (&bs) % 8 == 0);
         param.insert(param.end(), BIT_WRITER_DATA (&bs),  BIT_WRITER_DATA (&bs) + BIT_WRITER_BIT_SIZE (&bs)/8);
@@ -560,54 +631,6 @@ private:
             m_headers.insert(m_headers.end(), emulation, emulation + N_ELEMENTS(emulation));
             s = e + N_ELEMENTS(zeros);
          } while (1);
-    }
-
-    void generateCodecConfigAnnexB()
-    {
-        std::vector<Header*> headers;
-        headers.push_back(&m_sps);
-        headers.push_back(&m_pps);
-        uint8_t sync[] = {0, 0, 0, 1};
-        for (int i = 0; i < headers.size(); i++) {
-            m_headers.insert(m_headers.end(), sync, sync + N_ELEMENTS(sync));
-            appendHeaderWithEmulation(*headers[i]);
-        }
-    }
-
-    void generateCodecConfigAVCc()
-    {
-        const uint32_t configurationVersion = 0x01;
-        const uint32_t nalLengthSize = 4;
-        uint8_t profileIdc, profileComp, levelIdc;
-        BitWriter bs;
-        vector<uint8_t>& sps = m_sps;
-        vector<uint8_t>& pps = m_pps;
-        /* skip sps[0], which is the nal_unit_type */
-        profileIdc = sps[1];
-        profileComp = sps[2];
-        levelIdc = sps[3];
-        /* Header */
-        bit_writer_init (&bs, (sps.size() + pps.size() + 64) * 8);
-        bit_writer_put_bits_uint32 (&bs, configurationVersion, 8);
-        bit_writer_put_bits_uint32 (&bs, profileIdc, 8);
-        bit_writer_put_bits_uint32 (&bs, profileComp, 8);
-        bit_writer_put_bits_uint32 (&bs, levelIdc, 8);
-        bit_writer_put_bits_uint32 (&bs, 0x3f, 6);  /* 111111 */
-        bit_writer_put_bits_uint32 (&bs, nalLengthSize - 1, 2);
-        bit_writer_put_bits_uint32 (&bs, 0x07, 3);  /* 111 */
-
-        /* Write SPS */
-        bit_writer_put_bits_uint32 (&bs, 1, 5);     /* SPS count = 1 */
-        assert (BIT_WRITER_BIT_SIZE (&bs) % 8 == 0);
-        bit_writer_put_bits_uint32 (&bs, sps.size(), 16);
-        bit_writer_put_bytes (&bs, &sps[0], sps.size());
-        /* Write PPS */
-        bit_writer_put_bits_uint32 (&bs, 1, 8);     /* PPS count = 1 */
-        bit_writer_put_bits_uint32 (&bs, pps.size(), 16);
-        bit_writer_put_bytes (&bs, &pps[0], pps.size());
-
-        bsToHeader(m_headers, bs);
-        bit_writer_clear (&bs, TRUE);
     }
 
     Header m_vps;
@@ -701,13 +724,16 @@ public:
 };
 
 VaapiEncoderHEVC::VaapiEncoderHEVC():
-    m_useCabac(true),
-    m_useDct8x8(false),
+    m_ctbSize(16),
+    m_cuSize(16),
+    m_minTbSize(8),
+    m_maxTbSize(16),
+    m_profileIdc(VAProfileHEVCMain),
     m_reorderState(VAAPI_ENC_REORD_WAIT_FRAMES),
     m_streamFormat(AVC_STREAM_FORMAT_ANNEXB)
 {
     m_videoParamCommon.profile = VAProfileHEVCMain;
-    m_videoParamCommon.level = 40;
+    m_videoParamCommon.level = 51;
     m_videoParamCommon.rcParams.initQP = 26;
     m_videoParamCommon.rcParams.minQP = 1;
 
@@ -722,53 +748,14 @@ VaapiEncoderHEVC::~VaapiEncoderHEVC()
 bool VaapiEncoderHEVC::ensureCodedBufferSize()
 {
     AutoLock locker(m_paramLock);
-    uint32_t mbSize;
 
     FUNC_ENTER();
 
     if (m_maxCodedbufSize)
         return true;
 
-    if (!width() || !height()) {
-        return false;
-    }
+    m_maxCodedbufSize = m_cuAlignedWidth * m_cuAlignedHeight * 3 / 2;
 
-    m_mbWidth = (width() + 15) / 16;
-    m_mbHeight = (height() + 15)/ 16;
-    //FIXME:
-    m_numSlices = 1;
-    mbSize = m_mbWidth * m_mbHeight;
-    if (m_numSlices > (mbSize + 1) / 2)
-        m_numSlices = (mbSize + 1) / 2;
-    ASSERT (m_numSlices);
-
-    /* Maximum sizes for common headers (in bits) */
-    enum
-    {
-      MAX_SPS_HDR_SIZE = 16473,
-      MAX_VUI_PARAMS_SIZE = 210,
-      MAX_HRD_PARAMS_SIZE = 4103,
-      MAX_PPS_HDR_SIZE = 101,
-      MAX_SLICE_HDR_SIZE = 397 + 2572 + 6670 + 2402,
-    };
-
-    /* Only YUV 4:2:0 formats are supported for now. This means that we
-       have a limit of 3200 bits per macroblock. */
-    /* XXX: check profile and compute RawMbBits */
-    m_maxCodedbufSize = m_mbWidth * m_mbHeight * 400;
-
-    /* Account for SPS header */
-    /* XXX: exclude scaling lists, MVC/SVC extensions */
-    m_maxCodedbufSize += 4 + (MAX_SPS_HDR_SIZE +
-        MAX_VUI_PARAMS_SIZE + 2 * MAX_HRD_PARAMS_SIZE + 7)/8;
-
-    /* Account for PPS header */
-    /* XXX: exclude slice groups, scaling lists, MVC/SVC extensions */
-    m_maxCodedbufSize += 4 + (MAX_PPS_HDR_SIZE + 7) / 8;
-
-    /* Account for slice header */
-    m_maxCodedbufSize += m_numSlices * (4 +
-        (MAX_SLICE_HDR_SIZE + 7) / 8);
     DEBUG("m_maxCodedbufSize: %u", m_maxCodedbufSize);
 
     return true;
@@ -778,12 +765,35 @@ void VaapiEncoderHEVC::resetParams ()
 {
 
     m_levelIdc = level();
+    m_profileIdc = VAProfileHEVCMain;
 
     DEBUG("resetParams, ensureCodedBufferSize");
     ensureCodedBufferSize();
 
     //FIXME:
     m_numBFrames = 0;
+    m_numSlices = 1;
+
+    assert (width() && height());
+
+    m_cuAlignedWidth = (width() + m_cuSize -1) / m_cuSize * m_cuSize;
+    m_cuAlignedHeight = (height() + m_cuSize -1) / m_cuSize * m_cuSize;
+
+    m_ctbWidth = (width() + m_ctbSize -1) / m_ctbSize;
+    m_ctbHeight = (height() + m_ctbSize-1) / m_ctbSize;
+
+    m_confWinLeftOffset = m_confWinTopOffset = 0;
+
+    if (m_cuAlignedWidth != width() || m_cuAlignedHeight !=height()) {
+            m_confWinFlag = true;
+            m_confWinRightOffset = (m_cuAlignedWidth - width()) / 2;
+            m_confWinBottomOffset = (m_cuAlignedHeight -height()) / 2;
+    } else {
+        m_confWinFlag = false;
+        m_confWinRightOffset = 0;
+        m_confWinBottomOffset = 0;
+    }
+
 
     if (keyFramePeriod() < intraPeriod())
         keyFramePeriod() = intraPeriod();
@@ -807,11 +817,9 @@ void VaapiEncoderHEVC::resetParams ()
 
     m_maxRefList0Count = 1;
     m_maxRefList1Count = m_numBFrames > 0;
-    m_maxRefFrames =
-        m_maxRefList0Count + m_maxRefList1Count;
+    m_maxRefFrames = m_maxRefList0Count + m_maxRefList1Count;
 
     INFO("m_maxRefFrames: %d", m_maxRefFrames);
-
 
     resetGopStart();
 }
@@ -830,7 +838,6 @@ Encode_Status VaapiEncoderHEVC::getMaxOutSize(uint32_t *maxSize)
 
 Encode_Status VaapiEncoderHEVC::start()
 {
-    printf("start");
     FUNC_ENTER();
     resetParams();
     return VaapiEncoderBase::start();
@@ -1107,66 +1114,90 @@ void VaapiEncoderHEVC::referenceListFree()
     m_refList.clear();
 }
 
+void VaapiEncodeHEVC::setShortTermRFS(VAEncSequenceParameterBufferHEVC &seq)
+{
+    int i;
+    if (seq->intra_idr_period > 1 && seq->ip_period == 0)
+    {
+        m_shortRFS.num_negative_pics         = 1;
+        m_shortRFS.num_positive_pics[0]      = 0;
+    } else {
+        m_shortRFS.num_negative_pics         = 1;
+        m_shortRFS.num_positive_pics[0]      = 0;
+        m_shortRFS.num_positive_pics[1]      = 1;
+    }
+
+    m_shortRFS.num_short_term_ref_pic_sets = seq->ip_period + 1;
+    m_shortRFS.inter_ref_pic_set_prediction_flag = 0;
+
+    for (i = 0; i < m_shortRFS.num_short_term_ref_pic_sets; i++) //First position stores low-delay B
+    {
+        //Poc S0 is the reference distance b/t I pic and low-delay B or B pics.
+        m_shortRFS.delta_poc_s0_minus1[i]                 = (i == 0) ? seq->ip_period : (i-1);
+        m_shortRFS.used_by_curr_pic_s0_flag[i]            = 1;
+        //Poc S1 is the reference distance b/t P pic and low-delay B pics
+        m_shortRFS.delta_poc_s1_minus1[i]                 = (i == 0) ? 0 : (seq->ip_period-i);
+        m_shortRFS.used_by_curr_pic_s1_flag[i]            = 1;
+    }
+
+}
+
 bool VaapiEncoderHEVC::fill(VAEncSequenceParameterBufferHEVC* seqParam) const
 {
-    seqParam->seq_parameter_set_id = 0;
-    seqParam->level_idc = m_levelIdc;
+
+    seqParam->general_profile_idc = hevc_get_profile_idc(m_profileIdc);
+    seqParam->general_level_idc = level();
+    seqParam->general_tier_flag = 0;
     seqParam->intra_period = intraPeriod();
     seqParam->intra_idr_period = seqParam->intra_period;
     seqParam->ip_period = 1 + m_numBFrames;
     seqParam->bits_per_second = bitRate();
 
-    seqParam->max_num_ref_frames = m_maxRefFrames;
-    seqParam->picture_width_in_mbs = m_mbWidth;
-    seqParam->picture_height_in_mbs = m_mbHeight;
+    seqParam->pic_width_in_luma_samples = m_cuAlignedWidth;
+    seqParam->pic_height_in_luma_samples = m_cuAlignedHeight;
 
-    /*sequence field values */
-    seqParam->seq_fields.value = 0;
+    /*Only support yuv 4:2:0 format */
     seqParam->seq_fields.bits.chroma_format_idc = 1;
-    seqParam->seq_fields.bits.frame_mbs_only_flag = 1;
-    assert (m_log2MaxFrameNum >= 4);
-    seqParam->seq_fields.bits.log2_max_frame_num_minus4 =
-        m_log2MaxFrameNum - 4;
-    /* picture order count */
-    seqParam->seq_fields.bits.pic_order_cnt_type = 0;
-    assert (m_log2MaxPicOrderCnt >= 4);
-    seqParam->seq_fields.bits.log2_max_pic_order_cnt_lsb_minus4 =
-        m_log2MaxPicOrderCnt - 4;
+    /* separate color plane_flag*/
+    seqParam->seq_fields.bits.separate_colour_plane_flag = 0;
+    /* bit_depth_luma_minus8. Only 0 is supported for main profile */
+    seqParam->seq_fields.bits.bit_depth_luma_minus8 = 0;
+    /* bit_depth_chroma_minus8. Only 0 is supported for main profile*/
+    seqParam->seq_fields.bits.bit_depth_chroma_minus8 = 0;
+    /* scaling_list_enabled_flag. Use the default value  */
+    seqParam->seq_fields.bits.scaling_list_enabled_flag = 0;
+    /* strong_intra_smoothing_enabled_flag. Not use the bi-linear interpolation */
+    seqParam->seq_fields.bits.strong_intra_smoothing_enabled_flag = 0;
+    /* amp_enabled_flag(nLx2N or nRx2N). This is not supported */
+    seqParam->seq_fields.bits.amp_enabled_flag = 0;
+    /* sample_adaptive_offset_enabled_flag. Unsupported */
+    seqParam->seq_fields.bits.sample_adaptive_offset_enabled_flag = 0;
+    /* pcm_enabled_flag */
+    seqParam->seq_fields.bits.pcm_enabled_flag = 0;
+    /* pcm_loop_filter_disabled_flag */
+    seqParam->seq_fields.bits.pcm_loop_filter_disabled_flag = 1;
+    /* sps_temporal_mvp_enabled_flag. Enabled */
+    seqParam->seq_fields.bits.sps_temporal_mvp_enabled_flag = 0;
 
+    seqParam->log2_min_luma_coding_block_size_minus3 = std::log2(m_ctbSize)  -3;
+    seqParam->log2_diff_max_min_luma_coding_block_size = std:log2(m_cuSize) - std::log2(m_ctbSize);
+    seqParam->log2_min_transform_block_size_minus2 = std::log2(m_minTbSize) - 2;
+    seqParam->log2_diff_max_min_transform_block_size = std::log2(m_maxTbSize) - std::log2(m_minTbSize);
 
-    /* not used if pic_order_cnt_type == 0 */
-    if (seqParam->seq_fields.bits.pic_order_cnt_type == 1) {
-        seqParam->seq_fields.bits.delta_pic_order_always_zero_flag = TRUE;
-    }
+    /* max_transform_hierarchy_depth_inter */
+    seqParam->max_transform_hierarchy_depth_inter = 2;
 
-    /* frame_cropping_flag */
-    const int cropRight = (16 * m_mbWidth - width());
-    const int cropBottom = (16 * m_mbHeight - height());
-    if (cropRight || cropBottom) {
-        const int CHROMA_420 = 1;
-        const int CHROMA_422 = 2;
-        int chroma = seqParam->seq_fields.bits.chroma_format_idc;
-        static const uint32_t subWidthC = (chroma == CHROMA_420 || chroma == CHROMA_422) ? 2 : 1;
-        static const uint32_t subHeightC = chroma == CHROMA_420 ? 2 : 1;
-        const uint32_t cropUnitX = subWidthC;
-        const uint32_t cropUnitY = subHeightC * (2 - seqParam->seq_fields.bits.frame_mbs_only_flag);
+    /* max_transform_hierarchy_depth_intra */
+    seqParam->max_transform_hierarchy_depth_intra = 2;
 
-        seqParam->frame_cropping_flag = 1;
-        seqParam->frame_crop_right_offset = cropRight / cropUnitX;
-        seqParam->frame_crop_bottom_offset = cropBottom / cropUnitY;
-    }
+    /* The PCM fields can be ignored as PCM is disabled */
+    seqParam->pcm_sample_bit_depth_luma_minus1 = 7;
+    seqParam->pcm_sample_bit_depth_chroma_minus1 = 7;
+    seqParam->log2_min_pcm_luma_coding_block_size_minus3 = 0;
+    seqParam->log2_max_pcm_luma_coding_block_size_minus3 = 0;
 
-    /* VUI parameters are always set, at least for timing_info (framerate) */
-    seqParam->vui_parameters_present_flag = TRUE;
-    if (seqParam->vui_parameters_present_flag) {
-        seqParam->vui_fields.bits.aspect_ratio_info_present_flag = FALSE;
-        seqParam->vui_fields.bits.bitstream_restriction_flag = FALSE;
-        seqParam->vui_fields.bits.timing_info_present_flag = TRUE;
-        if (seqParam->vui_fields.bits.timing_info_present_flag) {
-            seqParam->num_units_in_tick = frameRateDenom();
-            seqParam->time_scale = frameRateNum() * 2;
-        }
-    }
+    setShortRFS(seqParam);
+
     return true;
 }
 
@@ -1175,6 +1206,9 @@ bool VaapiEncoderHEVC::fill(VAEncPictureParameterBufferHEVC* picParam, const Pic
                             const SurfacePtr& surface) const
 {
     uint32_t i = 0;
+
+    picParam->decoded_curr_pic.picture_id = surface->getID();
+    picParam->decoded_curr_pic.flags = VA_PICTURE_HEVC_RPS_LT_CURR;
 
     /* reference list,  */
     picParam->CurrPic.picture_id = surface->getID();
@@ -1193,25 +1227,57 @@ bool VaapiEncoderHEVC::fill(VAEncPictureParameterBufferHEVC* picParam, const Pic
     }
     picParam->coded_buf = picture->m_codedBuffer->getID();
 
-    picParam->pic_parameter_set_id = 0;
-    picParam->seq_parameter_set_id = 0;
-    picParam->last_picture = 0;  /* means last encoding picture */
-    picParam->frame_num = picture->m_frameNum;
-    picParam->pic_init_qp = initQP();
-    picParam->num_ref_idx_l0_active_minus1 =
-        (m_maxRefList0Count ? (m_maxRefList0Count - 1) : 0);
-    picParam->num_ref_idx_l1_active_minus1 =
-        (m_maxRefList1Count ? (m_maxRefList1Count - 1) : 0);
-    picParam->chroma_qp_index_offset = 0;
-    picParam->second_chroma_qp_index_offset = 0;
+    /*collocated_ref_pic_index should be 0xff  when element slice_temporal_mvp_enable_flag is 0 */
+    picParam->collocated_ref_pic_index = 0xff
 
-    /* set picture fields */
+    picParam->last_picture = 0;  /* means last encoding picture */
+
+    picParam->pic_init_qp = initQP();
+
+    picParam->diff_cu_qp_delta_depth = 0;
+
+    picParam->pps_cb_qp_offset = 0;
+    picParam->pps_cr_qp_offset = 0;
+
+    /* currently multi-tile is disabled */
+    picParam->num_tile_columns_minus1 = 0;
+    picParam->num_tile_rows_minus1 = 0;
+
+    memset(picParam->column_width_minus1, 0, sizeof(picParam->column_width_minus1));
+    memset(picParam->row_height_minus1, 0, sizeof(picParam->row_height_minus1));
+
+    picParam->log2_parallel_merge_level_minus2 = 0;
+
+    /*no bit size limitation*/
+    picParam->ctu_max_bitsize_allowed = 0;
+
+    picParam->num_ref_idx_l0_default_active_minus1 = 0;
+    picParam->num_ref_idx_l1_default_active_minus1 = 0;
+
+    picParam->slice_pic_parameter_set_id = 0;
+    picParam->nal_unit_type = PPS_NUT;
+
+    picParam->pic_fields.value = 0;
     picParam->pic_fields.bits.idr_pic_flag = picture->isIdr();
+    /*FIXME: can't support picture type B1 and B2 now */
+    picParam->pic_fields.bits.coding_type = picture->m_type;
     picParam->pic_fields.bits.reference_pic_flag = (picture->m_type != VAAPI_PICTURE_TYPE_B);
-    picParam->pic_fields.bits.entropy_coding_mode_flag = m_useCabac;
-    picParam->pic_fields.bits.transform_8x8_mode_flag = m_useDct8x8;
-    /* enable debloking */
-    picParam->pic_fields.bits.deblocking_filter_control_present_flag = TRUE;
+    picParam->pic_fields.bits.dependent_slice_segments_enabled_flag = 0;
+    picParam->pic_fields.bits.sign_data_hiding_enabled_flag = 0;
+    picParam->pic_fields.bits.constrained_intra_pred_flag = 0;
+    picParam->pic_fields.bits.transform_skip_enabled_flag = 0;
+    picParam->pic_fields.bits.cu_qp_delta_enabled_flag = 0;
+    picParam->pic_fields.bits.weighted_pred_flag = 0;
+    picParam->pic_fields.bits.weighted_bipred_flag = 0;
+    picParam->pic_fields.bits.transquant_bypass_enabled_flag = 0;
+    picParam->pic_fields.bits.tiles_enabled_flag = 0;
+    picParam->pic_fields.bits.entropy_coding_sync_enabled_flag = 0;
+    picParam->pic_fields.bits.loop_filter_across_tiles_enabled_flag = 0;
+    picParam->pic_fields.bits.pps_loop_filter_across_slices_enabled_flag = 0;
+    /* scaling_list_data_present_flag: use default scaling list data*/
+    picParam->pic_fields.bits.scaling_list_data_present_flag = 0;
+    picParam->pic_fields.bits.screen_content_flag = 0;
+    picParam->pic_fields.bits.no_output_of_prior_pics_flag = 0;
 
     return TRUE;
 }
@@ -1256,9 +1322,9 @@ bool VaapiEncoderHEVC::addSliceHeaders (const PicturePtr& picture,
                                         const vector<ReferencePtr>& refList1) const
 {
     VAEncSliceParameterBufferHEVC *sliceParam;
-    uint32_t sliceOfMbs, sliceModMbs, curSliceMbs;
-    uint32_t mbSize;
-    uint32_t lastMbIndex;
+    uint32_t sliceOfCtus, sliceModCtus, curSliceCtus;
+    uint32_t numCtus;
+    uint32_t lastCtuIndex;
 
     assert (picture);
     /*one reference frame supported */
@@ -1271,26 +1337,46 @@ bool VaapiEncoderHEVC::addSliceHeaders (const PicturePtr& picture,
             assert(refList1.size() == 1);
     }
 
-    mbSize = m_mbWidth * m_mbHeight;
+    numCtus= m_ctbWidth* m_ctbHeight;
 
-    assert (m_numSlices && m_numSlices < mbSize);
-    sliceOfMbs = mbSize / m_numSlices;
-    sliceModMbs = mbSize % m_numSlices;
-    lastMbIndex = 0;
+    assert (m_numSlices && m_numSlices < numCtus);
+    sliceOfCtus = numCtus / m_numSlices;
+    sliceModCtus = numCtus % m_numSlices;
+    lastCtuIndex = 0;
     for (int i = 0; i < m_numSlices; ++i) {
-        curSliceMbs = sliceOfMbs;
-        if (sliceModMbs) {
-            ++curSliceMbs;
-            --sliceModMbs;
+        curSliceCtus = sliceOfCtus;
+        if (sliceModCtus) {
+            ++curSliceCtus;
+            --sliceModCtus;
         }
         if (!picture->newSlice(sliceParam))
             return false;
 
-        sliceParam->macroblock_address = lastMbIndex;
-        sliceParam->num_macroblocks = curSliceMbs;
-        sliceParam->macroblock_info = VA_INVALID_ID;
+        sliceParam->slice_segment_address= lastCtuIndex;
+        sliceParam->num_ctu_in_slice = curSliceCtus;
         sliceParam->slice_type = hevc_get_slice_type (picture->m_type);
         assert (sliceParam->slice_type != -1);
+        sliceParam->slice_pic_parameter_set_id = 0;
+        if (picture->m_type != VAAPI_PICTURE_TYPE_I && refList0.size() > 0)
+            sliceParam->num_ref_idx_l0_active_minus1 = refList0.size() - 1;
+        if (picture->m_type == VAAPI_PICTURE_TYPE_B && refList1.size() > 0)
+            sliceParam->num_ref_idx_l1_active_minus1 = refList1.size() - 1;
+
+        fillReferenceList(sliceParam, refList0, 0);
+        fillReferenceList(sliceParam, refList1, 1);
+
+        /* luma_log2_weight_denom should be the range: [0, 7] */
+        sliceParam->luma_log2_weight_denom = 0;
+        /* max_num_merge_cand should be the range [1, 5 + NumExtraMergeCand] */
+        sliceParam->max_num_merge_cand = 5;
+
+        /* let slice_qp equal to init_qp*/
+        sliceParam->slice_qp_delta = 0;
+
+        /* slice_beta_offset_div2 and slice_tc_offset_div2  should be the range [-6, 6] */
+        sliceParam->slice_beta_offset_div2 = 2;
+        sliceParam->slice_tc_offset_div2 = 2;
+
         sliceParam->idr_pic_id = m_idrNum;
         sliceParam->pic_order_cnt_lsb = picture->m_poc;
 
@@ -1302,17 +1388,15 @@ bool VaapiEncoderHEVC::addSliceHeaders (const PicturePtr& picture,
         fillReferenceList(sliceParam, refList0, 0);
         fillReferenceList(sliceParam, refList1, 1);
 
-
-        sliceParam->slice_qp_delta = initQP() - minQP();
-        if (sliceParam->slice_qp_delta > 4)
-            sliceParam->slice_qp_delta = 4;
         sliceParam->slice_alpha_c0_offset_div2 = 2;
         sliceParam->slice_beta_offset_div2 = 2;
 
         /* set calculation for next slice */
-        lastMbIndex += curSliceMbs;
+        lastCtuIndex += curSliceCtus;
+
+        sliceParam->slice_fields.bits.last_slice_of_pic_flag = (lastCtuIndex == numCtus);
     }
-    assert (lastMbIndex == mbSize);
+    assert (lastCtuIndex == numCtus);
     return true;
 }
 

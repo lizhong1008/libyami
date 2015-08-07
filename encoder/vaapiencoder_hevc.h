@@ -39,6 +39,19 @@ class VaapiEncPictureHEVC;
 class VaapiEncoderHEVCRef;
 class VaapiEncStreamHeaderHEVC;
 
+typedef struct shortRFS
+{
+    unsigned char    num_negative_pics;
+    unsigned char    num_positive_pics[2];
+    unsigned char    delta_poc_s0_minus1[8];
+    unsigned char    used_by_curr_pic_s0_flag[8];
+    unsigned char    delta_poc_s1_minus1[8];
+    unsigned char    used_by_curr_pic_s1_flag[8];
+    unsigned char    num_short_term_ref_pic_sets;
+    unsigned char    short_term_ref_pic_set_idx;
+    unsigned int     inter_ref_pic_set_prediction_flag;
+}ShortRFS;
+
 class VaapiEncoderHEVC : public VaapiEncoderBase {
 public:
     //shortcuts, It's intended to elimilate codec diffrence
@@ -65,7 +78,6 @@ protected:
     virtual Encode_Status doEncode(const SurfacePtr&, uint64_t timeStamp, bool forceKeyFrame);
     virtual Encode_Status getCodecConfig(VideoEncOutputBuffer *outBuffer);
 
-private:
     //following code is a template for other encoder implementation
     Encode_Status encodePicture(const PicturePtr&);
     bool fill(VAEncSequenceParameterBufferHEVC*) const;
@@ -100,18 +112,25 @@ private:
     void setIFrame(const PicturePtr&);
     void setIdrFrame(const PicturePtr&);
     void setIntraFrame(const PicturePtr&, bool idIdr);
-
     void resetParams();
+    void setShortRFS(const VAEncSequenceParameterBufferHEVC&);
 
     VideoParamsAVC m_videoParamAVC;
 
+    uint8_t m_profileIdc;
     uint8_t m_levelIdc;
     uint32_t m_numSlices;
     uint32_t m_numBFrames;
-    uint32_t m_mbWidth;
-    uint32_t m_mbHeight;
-    bool  m_useCabac;
-    bool  m_useDct8x8;
+    uint32_t m_cuSize;
+    uint32_t m_ctbSize;
+    uint32_t m_minTbSize;
+    uint32_t m_maxTbSize;
+
+    uint32_t m_cuAlignedWidth;
+    uint32_t m_cuAlignedHeight;
+    uint32_t m_ctbWidth;
+    uint32_t m_ctbHeight;
+
     AVCStreamFormat m_streamFormat;
 
     /* re-ordering */
@@ -134,6 +153,13 @@ private:
     uint32_t m_log2MaxPicOrderCnt;
     uint32_t m_idrNum;
 
+    bool m_confWinFlag;
+    uinit32_t m_confWinLeftOffset;
+    uinit32_t m_confWinRightOffset;
+    uinit32_t m_confWinTopOffset;
+    uinit32_t m_confWinBottomOffset;
+
+    ShortRFS m_shortRFS;
     StreamHeaderPtr m_headers;
     Lock m_paramLock; // locker for parameters update, for example: m_sps/m_pps/m_maxCodedbufSize (width/height etc)
 
