@@ -113,7 +113,7 @@ protected:
     void setIdrFrame(const PicturePtr&);
     void setIntraFrame(const PicturePtr&, bool idIdr);
     void resetParams();
-    void setShortRFS(const VAEncSequenceParameterBufferHEVC&);
+    void setShortRFS(const VAEncSequenceParameterBufferHEVC*);
 
     VideoParamsAVC m_videoParamAVC;
 
@@ -154,10 +154,10 @@ protected:
     uint32_t m_idrNum;
 
     bool m_confWinFlag;
-    uinit32_t m_confWinLeftOffset;
-    uinit32_t m_confWinRightOffset;
-    uinit32_t m_confWinTopOffset;
-    uinit32_t m_confWinBottomOffset;
+    uint32_t m_confWinLeftOffset;
+    uint32_t m_confWinRightOffset;
+    uint32_t m_confWinTopOffset;
+    uint32_t m_confWinBottomOffset;
 
     ShortRFS m_shortRFS;
     StreamHeaderPtr m_headers;

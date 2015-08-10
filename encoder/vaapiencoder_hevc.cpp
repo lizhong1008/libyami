@@ -34,7 +34,6 @@
 #include "vaapiencpicture.h"
 #include "vaapiencoder_factory.h"
 #include <algorithm>
-#include <cmath>
 #include <tr1/functional>
 namespace YamiMediaCodec{
 //shortcuts
@@ -76,16 +75,25 @@ hevc_get_slice_type (VaapiPictureType type)
     return -1;
 }
 
+static uint32_t log2 (uint32_t num)
+{
+    uint32_t ret = 0;
+    assert(num);
+
+    while ((num >>= 1))
+        ++ret;
+
+    return ret;
+}
+
 /* Get log2_max_frame_num value for H.264 specification */
 static uint32_t
 hevc_get_log2_max_frame_num (uint32_t num)
 {
     uint32_t ret = 0;
 
-    while (num) {
-        ++ret;
-        num >>= 1;
-    }
+    ret = log2(num);
+
     if (ret <= 4)
         ret = 4;
     else if (ret > 10)
@@ -110,7 +118,7 @@ static uint8_t hevc_get_profile_idc (VaapiProfile profile)
 
 }
 
-BOOL
+static BOOL
 bit_writer_put_ue(BitWriter *bitwriter, uint32_t value)
 {
     uint32_t  size_in_bits = 0;
@@ -128,7 +136,7 @@ bit_writer_put_ue(BitWriter *bitwriter, uint32_t value)
     return TRUE;
 }
 
-BOOL
+static BOOL
 bit_writer_put_se(BitWriter *bitwriter, int32_t value)
 {
     uint32_t new_val;
@@ -156,7 +164,7 @@ bit_writer_write_nal_header(
     /* layer_id */
     bit_writer_put_bits_uint32(bitwriter, 0, 6);
     /* temporal_id_plus1*/
-    bitstream_put_ui(bitwriter, 1, 3);
+    bit_writer_put_bits_uint32(bitwriter, 1, 3);
 
     return TRUE;
 }
@@ -176,7 +184,7 @@ static void profile_tier_level(
     const VAEncSequenceParameterBufferHEVC* const seq
 )
 {
-    uinit32_t i;
+    uint32_t i;
     unsigned char vps_general_level_idc = seq->general_level_idc * 3;
 
     if (profile_present_flag) {
@@ -197,7 +205,7 @@ static void profile_tier_level(
         /* general_interlaced_source_flag */
         bit_writer_put_bits_uint32(bitwriter, 0, 1);
         /* general_non_packed_constraint_flag */
-        bitstream_put_ui(bitwriter, 0, 1);
+        bit_writer_put_bits_uint32(bitwriter, 0, 1);
         /* general_frame_only_constraint_flag */
         bit_writer_put_bits_uint32(bitwriter, 1, 1);
 
@@ -381,14 +389,13 @@ private:
     BOOL bit_writer_write_sps(
         BitWriter *bitwriter,
         const VAEncSequenceParameterBufferHEVC* const seq,
-        shortRFS* const shortRFS,
         VaapiProfile profile
     )
     {
         uint32_t i = 0;
         bool conf_win_flag = false;
-        uinit32_t conf_win_left_offset = 0, conf_win_right_offset = 0;
-        uinit32_t conf_win_top_offset = 0, conf_win_bottom_offset = 0;
+        uint32_t conf_win_left_offset = 0, conf_win_right_offset = 0;
+        uint32_t conf_win_top_offset = 0, conf_win_bottom_offset = 0;
 
         /* nal_start_code */
         bit_writer_put_bits_uint32(bitwriter, HEVC_NAL_START_CODE, 24);
@@ -405,7 +412,7 @@ private:
         profile_tier_level(bitwriter, 1, 0, seq);
 
         /* seq_parameter_set_id */
-        bit_writer_put_ue(bitwriter, seq->seq_parameter_set_id);
+        bit_writer_put_ue(bitwriter, 0);
         /* chroma_format_idc: only support 4:2:0 for libva */
         bit_writer_put_ue(bitwriter, seq->seq_fields.bits.chroma_format_idc);
         if (3 == seq->seq_fields.bits.chroma_format_idc) {
@@ -427,9 +434,9 @@ private:
         }
 
         /* bit_depth_luma_minus8 */
-        bitstream_put_ue(bitwriter, seq->seq_fields.bits.bit_depth_luma_minus8);
+        bit_writer_put_ue(bitwriter, seq->seq_fields.bits.bit_depth_luma_minus8);
         /* bit_depth_chroma_minus8 */
-        bitstream_put_ue(bitwriter, seq->seq_fields.bits.bit_depth_chroma_minus8);
+        bit_writer_put_ue(bitwriter, seq->seq_fields.bits.bit_depth_chroma_minus8);
 
         /* log2_max_pic_order_cnt_lsb_minus4 */
         assert(m_log2MaxPicOrderCnt >= 4);
@@ -460,16 +467,16 @@ private:
             /* pcm_sample_bit_depth_luma_minus1 */
             bit_writer_put_bits_uint32(bitwriter, seq->pcm_sample_bit_depth_chroma_minus1, 4);
             /* log2_min_pcm_luma_coding_block_size_minus3 */
-            bit_writer_put_bits_uint32(bitwriter, seq->log2_min_pcm_luma_coding_block_size_minus3);
+            bit_writer_put_ue(bitwriter, seq->log2_min_pcm_luma_coding_block_size_minus3);
             /* log2_diff_max_min_pcm_luma_coding_block_size */
-            bit_writer_put_bits_uint32(bitwriter, seq->log2_max_pcm_luma_coding_block_size_minus3 - seq->log2_min_pcm_luma_coding_block_size_minus3);
+            bit_writer_put_ue(bitwriter, seq->log2_max_pcm_luma_coding_block_size_minus3 - seq->log2_min_pcm_luma_coding_block_size_minus3);
             /* pcm_loop_filter_disabled_flag */
             bit_writer_put_bits_uint32(bitwriter, seq->seq_fields.bits.pcm_loop_filter_disabled_flag, 1);
         }
 
-        bit_writer_put_ue(bitwriter, shortRFS.num_short_term_ref_pic_sets);
-        for (i = 0; i < shortRFS.num_short_term_ref_pic_sets; i++)
-            st_ref_pic_set(bitwriter, i, i, shortRFS);
+        bit_writer_put_ue(bitwriter, m_shortRFS.num_short_term_ref_pic_sets);
+        for (i = 0; i < m_shortRFS.num_short_term_ref_pic_sets; i++)
+            st_ref_pic_set(bitwriter, i, i, &m_shortRFS);
 
         /* long_term_ref_pics_present_flag */
         bit_writer_put_bits_uint32(bitwriter, 0, 1);
@@ -1114,7 +1121,7 @@ void VaapiEncoderHEVC::referenceListFree()
     m_refList.clear();
 }
 
-void VaapiEncodeHEVC::setShortTermRFS(VAEncSequenceParameterBufferHEVC &seq)
+void VaapiEncoderHEVC::setShortRFS(const VAEncSequenceParameterBufferHEVC *seq)
 {
     int i;
     if (seq->intra_idr_period > 1 && seq->ip_period == 0)
@@ -1179,10 +1186,10 @@ bool VaapiEncoderHEVC::fill(VAEncSequenceParameterBufferHEVC* seqParam) const
     /* sps_temporal_mvp_enabled_flag. Enabled */
     seqParam->seq_fields.bits.sps_temporal_mvp_enabled_flag = 0;
 
-    seqParam->log2_min_luma_coding_block_size_minus3 = std::log2(m_ctbSize)  -3;
-    seqParam->log2_diff_max_min_luma_coding_block_size = std:log2(m_cuSize) - std::log2(m_ctbSize);
-    seqParam->log2_min_transform_block_size_minus2 = std::log2(m_minTbSize) - 2;
-    seqParam->log2_diff_max_min_transform_block_size = std::log2(m_maxTbSize) - std::log2(m_minTbSize);
+    seqParam->log2_min_luma_coding_block_size_minus3 = log2(m_ctbSize)  -3;
+    seqParam->log2_diff_max_min_luma_coding_block_size = log2(m_cuSize) - log2(m_ctbSize);
+    seqParam->log2_min_transform_block_size_minus2 = log2(m_minTbSize) - 2;
+    seqParam->log2_diff_max_min_transform_block_size = log2(m_maxTbSize) - log2(m_minTbSize);
 
     /* max_transform_hierarchy_depth_inter */
     seqParam->max_transform_hierarchy_depth_inter = 2;
@@ -1210,25 +1217,21 @@ bool VaapiEncoderHEVC::fill(VAEncPictureParameterBufferHEVC* picParam, const Pic
     picParam->decoded_curr_pic.picture_id = surface->getID();
     picParam->decoded_curr_pic.flags = VA_PICTURE_HEVC_RPS_LT_CURR;
 
-    /* reference list,  */
-    picParam->CurrPic.picture_id = surface->getID();
-    picParam->CurrPic.TopFieldOrderCnt = picture->m_poc;
-
     if (picture->m_type != VAAPI_PICTURE_TYPE_I) {
         list<ReferencePtr>::const_iterator it;
         for (it = m_refList.begin(); it != m_refList.end(); ++it) {
             assert(*it && (*it)->m_pic && ((*it)->m_pic->getID() != VA_INVALID_ID));
-            picParam->ReferenceFrames[i].picture_id = (*it)->m_pic->getID();
+            picParam->reference_frames[i].picture_id = (*it)->m_pic->getID();
             ++i;
         }
     }
     for (; i < 16; ++i) {
-        picParam->ReferenceFrames[i].picture_id = VA_INVALID_ID;
+        picParam->reference_frames[i].picture_id = VA_INVALID_ID;
     }
     picParam->coded_buf = picture->m_codedBuffer->getID();
 
     /*collocated_ref_pic_index should be 0xff  when element slice_temporal_mvp_enable_flag is 0 */
-    picParam->collocated_ref_pic_index = 0xff
+    picParam->collocated_ref_pic_index = 0xff;
 
     picParam->last_picture = 0;  /* means last encoding picture */
 
@@ -1292,7 +1295,7 @@ bool VaapiEncoderHEVC::ensureSequenceHeader(const PicturePtr& picture,const VAEn
 bool VaapiEncoderHEVC::ensurePictureHeader(const PicturePtr& picture, const VAEncPictureParameterBufferHEVC* const picParam)
 {
     m_headers->addPPS(picParam);
-    m_headers->generateCodecConfig(m_streamFormat == AVC_STREAM_FORMAT_AVCC);
+    m_headers->generateCodecConfig();
     picture->m_headers = m_headers;
     return true;
 }
@@ -1302,12 +1305,12 @@ static void fillReferenceList(VAEncSliceParameterBufferHEVC* slice, const vector
     VAPictureHEVC* picList;
     int total;
     if (!index) {
-        picList = slice->RefPicList0;
-        total = N_ELEMENTS(slice->RefPicList0);
+        picList = slice->ref_pic_list0;
+        total = N_ELEMENTS(slice->ref_pic_list0);
     }
     else {
-        picList = slice->RefPicList1;
-        total = N_ELEMENTS(slice->RefPicList1);
+        picList = slice->ref_pic_list0;
+        total = N_ELEMENTS(slice->ref_pic_list0);
     }
     int i = 0;
     for (; i < refList.size(); i++)
@@ -1376,20 +1379,6 @@ bool VaapiEncoderHEVC::addSliceHeaders (const PicturePtr& picture,
         /* slice_beta_offset_div2 and slice_tc_offset_div2  should be the range [-6, 6] */
         sliceParam->slice_beta_offset_div2 = 2;
         sliceParam->slice_tc_offset_div2 = 2;
-
-        sliceParam->idr_pic_id = m_idrNum;
-        sliceParam->pic_order_cnt_lsb = picture->m_poc;
-
-        if (picture->m_type != VAAPI_PICTURE_TYPE_I && refList0.size() > 0)
-            sliceParam->num_ref_idx_l0_active_minus1 = refList0.size() - 1;
-        if (picture->m_type == VAAPI_PICTURE_TYPE_B && refList1.size() > 0)
-            sliceParam->num_ref_idx_l1_active_minus1 = refList1.size() - 1;
-
-        fillReferenceList(sliceParam, refList0, 0);
-        fillReferenceList(sliceParam, refList1, 1);
-
-        sliceParam->slice_alpha_c0_offset_div2 = 2;
-        sliceParam->slice_beta_offset_div2 = 2;
 
         /* set calculation for next slice */
         lastCtuIndex += curSliceCtus;
