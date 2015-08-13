@@ -519,7 +519,8 @@ private:
         const VAEncPictureParameterBufferHEVC* const pic
     )
     {
-        uint32_t deblocking_filter_control_present_flag  = 1;
+        uint32_t deblocking_filter_control_present_flag  = 0;
+        uint32_t pps_slice_chroma_qp_offsets_present_flag = 1;
 
         bit_writer_write_nal_header(bitwriter, PPS_NUT);
 
@@ -570,7 +571,7 @@ private:
         bit_writer_put_se(bitwriter, pic->pps_cr_qp_offset);
 
         /* pps_slice_chroma_qp_offsets_present_flag */
-        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+        bit_writer_put_bits_uint32(bitwriter, pps_slice_chroma_qp_offsets_present_flag, 1);
 
         /* weighted_pred_flag */
         bit_writer_put_bits_uint32(bitwriter, pic->pic_fields.bits.weighted_pred_flag, 1);
@@ -768,7 +769,7 @@ VaapiEncoderHEVC::VaapiEncoderHEVC():
     m_videoParamCommon.rcParams.initQP = 26;
     m_videoParamCommon.rcParams.minQP = 1;
 
-    m_videoParamAVC.idrInterval = 30;
+    m_videoParamAVC.idrInterval = 1;
 }
 
 VaapiEncoderHEVC::~VaapiEncoderHEVC()
