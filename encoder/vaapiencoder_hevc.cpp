@@ -755,9 +755,9 @@ public:
 };
 
 VaapiEncoderHEVC::VaapiEncoderHEVC():
-    m_ctbSize(16),
+    m_ctbSize(8),
     m_cuSize(16),
-    m_minTbSize(8),
+    m_minTbSize(4),
     m_maxTbSize(16),
     m_profileIdc(VAProfileHEVCMain),
     m_reorderState(VAAPI_ENC_REORD_WAIT_FRAMES),
@@ -798,9 +798,6 @@ void VaapiEncoderHEVC::resetParams ()
     m_levelIdc = level();
     m_profileIdc = VAProfileHEVCMain;
 
-    DEBUG("resetParams, ensureCodedBufferSize");
-    ensureCodedBufferSize();
-
     //FIXME:
     m_numBFrames = 0;
     m_numSlices = 1;
@@ -810,8 +807,8 @@ void VaapiEncoderHEVC::resetParams ()
     m_cuAlignedWidth = (width() + m_cuSize -1) / m_cuSize * m_cuSize;
     m_cuAlignedHeight = (height() + m_cuSize -1) / m_cuSize * m_cuSize;
 
-    m_ctbWidth = (width() + m_ctbSize -1) / m_ctbSize;
-    m_ctbHeight = (height() + m_ctbSize-1) / m_ctbSize;
+    m_ctbWidth = (width() + m_cuSize -1) / m_cuSize;
+    m_ctbHeight = (height() + m_cuSize-1) / m_cuSize;
 
     m_confWinLeftOffset = m_confWinTopOffset = 0;
 
@@ -837,6 +834,9 @@ void VaapiEncoderHEVC::resetParams ()
 
     if (m_numBFrames > (intraPeriod() + 1) / 2)
         m_numBFrames = (intraPeriod() + 1) / 2;
+
+    DEBUG("resetParams, ensureCodedBufferSize");
+    ensureCodedBufferSize();
 
     /* init m_maxFrameNum, max_poc */
     m_log2MaxFrameNum =
@@ -1205,7 +1205,7 @@ bool VaapiEncoderHEVC::fill(VAEncSequenceParameterBufferHEVC* seqParam) const
     /* strong_intra_smoothing_enabled_flag. Not use the bi-linear interpolation */
     seqParam->seq_fields.bits.strong_intra_smoothing_enabled_flag = 0;
     /* amp_enabled_flag(nLx2N or nRx2N). This is not supported */
-    seqParam->seq_fields.bits.amp_enabled_flag = 0;
+    seqParam->seq_fields.bits.amp_enabled_flag = 1;
     /* sample_adaptive_offset_enabled_flag. Unsupported */
     seqParam->seq_fields.bits.sample_adaptive_offset_enabled_flag = 0;
     /* pcm_enabled_flag */
@@ -1308,7 +1308,7 @@ bool VaapiEncoderHEVC::fill(VAEncPictureParameterBufferHEVC* picParam, const Pic
     picParam->pic_fields.bits.pps_loop_filter_across_slices_enabled_flag = 0;
     /* scaling_list_data_present_flag: use default scaling list data*/
     picParam->pic_fields.bits.scaling_list_data_present_flag = 0;
-    picParam->pic_fields.bits.screen_content_flag = 0;
+    picParam->pic_fields.bits.screen_content_flag = 1;
     picParam->pic_fields.bits.no_output_of_prior_pics_flag = 0;
 
     return TRUE;
@@ -1413,7 +1413,7 @@ bool VaapiEncoderHEVC::addSliceHeaders (const PicturePtr& picture,
         /* set calculation for next slice */
         lastCtuIndex += curSliceCtus;
 
-        sliceParam->slice_fields.bits.slice_deblocking_filter_disabled_flag = 0;
+        sliceParam->slice_fields.bits.slice_deblocking_filter_disabled_flag = 1;
 
         sliceParam->slice_fields.bits.last_slice_of_pic_flag = (lastCtuIndex == numCtus);
     }
