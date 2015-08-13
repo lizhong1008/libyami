@@ -53,6 +53,7 @@ typedef struct shortRFS
 }ShortRFS;
 
 class VaapiEncoderHEVC : public VaapiEncoderBase {
+    friend class VaapiEncStreamHeaderHEVC;
 public:
     //shortcuts, It's intended to elimilate codec diffrence
     //to make template for other codec implelmentation.
@@ -78,6 +79,7 @@ protected:
     virtual Encode_Status doEncode(const SurfacePtr&, uint64_t timeStamp, bool forceKeyFrame);
     virtual Encode_Status getCodecConfig(VideoEncOutputBuffer *outBuffer);
 
+private:
     //following code is a template for other encoder implementation
     Encode_Status encodePicture(const PicturePtr&);
     bool fill(VAEncSequenceParameterBufferHEVC*) const;

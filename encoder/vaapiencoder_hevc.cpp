@@ -185,7 +185,11 @@ static void profile_tier_level(
 )
 {
     uint32_t i;
+    bool general_profile_compatibility_flag[32] = {0};
+
     unsigned char vps_general_level_idc = seq->general_level_idc * 3;
+
+    general_profile_compatibility_flag[1] = general_profile_compatibility_flag[2] = 1;
 
     if (profile_present_flag) {
         /* general_profile_space */
@@ -196,8 +200,8 @@ static void profile_tier_level(
         bit_writer_put_bits_uint32(bitwriter, seq->general_profile_idc, 5);
 
         /* general_profile_compatibility_flag. Only the bit corresponding to profile_idc is set */
-        for (i = 0; i < 32; i++) {
-            bit_writer_put_bits_uint32(bitwriter, 0, 1);
+        for (i = 0; i < N_ELEMENTS(general_profile_compatibility_flag); i++) {
+            bit_writer_put_bits_uint32(bitwriter, general_profile_compatibility_flag[i], 1);
         }
 
         /* general_progressive_source_flag */
@@ -227,10 +231,14 @@ static void profile_tier_level(
 }
 
 
-class VaapiEncStreamHeaderHEVC :public VaapiEncoderHEVC
+class VaapiEncStreamHeaderHEVC
 {
     typedef std::vector<uint8_t> Header;
 public:
+
+    VaapiEncStreamHeaderHEVC();
+    VaapiEncStreamHeaderHEVC(VaapiEncoderHEVC* encoder) {m_encoder = encoder;};
+
     void setVPS(const VAEncSequenceParameterBufferHEVC* const sequence, VaapiProfile profile)
     {
         ASSERT(m_vps.empty());
@@ -265,8 +273,9 @@ public:
     {
         std::vector<Header*> headers;
 
-        ASSERT(m_sps.size() && (m_sps.size() > 4)&& m_pps.size() && m_headers.empty());
+        ASSERT(m_vps.size() && m_sps.size() && (m_sps.size() > 4)&& m_pps.size() && m_headers.empty());
 
+        headers.push_back(&m_vps);
         headers.push_back(&m_sps);
         headers.push_back(&m_pps);
         uint8_t sync[] = {0, 0, 0, 1};
@@ -297,9 +306,6 @@ private:
     {
         BOOL vps_timing_info_present_flag = 0;
 
-        /* nal_start_code */
-        bit_writer_put_bits_uint32(bitwriter, HEVC_NAL_START_CODE, 24);
-
         bit_writer_write_nal_header(bitwriter, VPS_NUT);
 
         /* vps_video_parameter_set_id */
@@ -323,6 +329,15 @@ private:
         /* vps_sub_layer_ordering_info_present_flag */
         bit_writer_put_bits_uint32(bitwriter, 0, 1);
 
+        /*vps_max_dec_pic_buffering_minus1*/
+        bit_writer_put_ue(bitwriter, 6);
+
+        /*vps_max_num_reorder_pics*/
+        bit_writer_put_ue(bitwriter, 0);
+
+        /*vps_max_latency_increase_plus1*/
+        bit_writer_put_ue(bitwriter, 0);
+
         /* vps_max_layer_id */
         bit_writer_put_bits_uint32(bitwriter, 0, 6);
 
@@ -344,13 +359,13 @@ private:
 
     }
 
-    void st_ref_pic_set(BitWriter *bs, int stRpsIdx, int refIdx, shortRFS* const shortRFS)
+    void st_ref_pic_set(BitWriter *bs, int stRpsIdx, int refIdx, const ShortRFS shortRFS)
     {
         int i,j;
         if (stRpsIdx)
-            bit_writer_put_bits_uint32(bs, shortRFS->inter_ref_pic_set_prediction_flag, 1);
+            bit_writer_put_bits_uint32(bs, shortRFS.inter_ref_pic_set_prediction_flag, 1);
 
-        if (shortRFS->inter_ref_pic_set_prediction_flag)
+        if (shortRFS.inter_ref_pic_set_prediction_flag)
         {
 #if 0
             if (stRpsIdx == ps->num_short_term_ref_pic_sets)
@@ -368,18 +383,18 @@ private:
             }
 #endif
         } else {
-            bit_writer_put_ue(bs, shortRFS->num_negative_pics);
-            bit_writer_put_ue(bs, shortRFS->num_positive_pics[refIdx==0?0:1]);
+            bit_writer_put_ue(bs, shortRFS.num_negative_pics);
+            bit_writer_put_ue(bs, shortRFS.num_positive_pics[refIdx==0?0:1]);
 
-            for (i = 0; i < shortRFS->num_negative_pics; i++)
+            for (i = 0; i < shortRFS.num_negative_pics; i++)
             {
-                bit_writer_put_ue(bs, shortRFS->delta_poc_s0_minus1[i]);
-                bit_writer_put_bits_uint32(bs, shortRFS->used_by_curr_pic_s0_flag[i], 1);
+                bit_writer_put_ue(bs, shortRFS.delta_poc_s0_minus1[i]);
+                bit_writer_put_bits_uint32(bs, shortRFS.used_by_curr_pic_s0_flag[i], 1);
             }
-            for (i = 0; i < shortRFS->num_positive_pics[refIdx==0?0:1]; i++)
+            for (i = 0; i < shortRFS.num_positive_pics[refIdx==0?0:1]; i++)
             {
-                bit_writer_put_ue(bs, shortRFS->delta_poc_s1_minus1[i]);
-                bit_writer_put_bits_uint32(bs, shortRFS->used_by_curr_pic_s1_flag[i], 1);
+                bit_writer_put_ue(bs, shortRFS.delta_poc_s1_minus1[i]);
+                bit_writer_put_bits_uint32(bs, shortRFS.used_by_curr_pic_s1_flag[i], 1);
             }
         }
 
@@ -393,19 +408,13 @@ private:
     )
     {
         uint32_t i = 0;
-        bool conf_win_flag = false;
-        uint32_t conf_win_left_offset = 0, conf_win_right_offset = 0;
-        uint32_t conf_win_top_offset = 0, conf_win_bottom_offset = 0;
-
-        /* nal_start_code */
-        bit_writer_put_bits_uint32(bitwriter, HEVC_NAL_START_CODE, 24);
 
         bit_writer_write_nal_header(bitwriter, SPS_NUT);
 
         /* sps_video_parameter_set_id */
         bit_writer_put_bits_uint32(bitwriter, 0, 4);
         /* sps_max_sub_layers_minus1 */
-        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+        bit_writer_put_bits_uint32(bitwriter, 0, 3);
         /* sps_temporal_id_nesting_flag */
         bit_writer_put_bits_uint32(bitwriter, 1, 1);
 
@@ -424,13 +433,13 @@ private:
         bit_writer_put_ue(bitwriter, seq->pic_height_in_luma_samples);
 
         /* conformance_window_flag */
-        bit_writer_put_bits_uint32(bitwriter, m_confWinFlag, 1);
+        bit_writer_put_bits_uint32(bitwriter, m_encoder->m_confWinFlag, 1);
 
-        if (conf_win_flag) {
-            bit_writer_put_ue(bitwriter, m_confWinLeftOffset);
-            bit_writer_put_ue(bitwriter, m_confWinRightOffset);
-            bit_writer_put_ue(bitwriter, m_confWinTopOffset);
-            bit_writer_put_ue(bitwriter, m_confWinBottomOffset);
+        if (m_encoder->m_confWinFlag) {
+            bit_writer_put_ue(bitwriter, m_encoder->m_confWinLeftOffset);
+            bit_writer_put_ue(bitwriter, m_encoder->m_confWinRightOffset);
+            bit_writer_put_ue(bitwriter, m_encoder->m_confWinTopOffset);
+            bit_writer_put_ue(bitwriter, m_encoder->m_confWinBottomOffset);
         }
 
         /* bit_depth_luma_minus8 */
@@ -439,11 +448,18 @@ private:
         bit_writer_put_ue(bitwriter, seq->seq_fields.bits.bit_depth_chroma_minus8);
 
         /* log2_max_pic_order_cnt_lsb_minus4 */
-        assert(m_log2MaxPicOrderCnt >= 4);
-        bit_writer_put_ue(bitwriter, m_log2MaxPicOrderCnt - 4);
+        assert(m_encoder->m_log2MaxPicOrderCnt >= 4);
+        bit_writer_put_ue(bitwriter, m_encoder->m_log2MaxPicOrderCnt - 4);
 
         /* sps_sub_layer_ordering_info_present_flag */
         bit_writer_put_bits_uint32(bitwriter, 0, 1);
+
+       /* sps_max_dec_pic_buffering_minus1 */
+       bit_writer_put_ue(bitwriter, 6);
+       /* sps_max_num_reorder_pics */
+       bit_writer_put_ue(bitwriter, 0);
+       /* sps_max_latency_increase_plus1 */
+       bit_writer_put_ue(bitwriter, 0);
 
         bit_writer_put_ue(bitwriter, seq->log2_min_luma_coding_block_size_minus3);
         bit_writer_put_ue(bitwriter, seq->log2_diff_max_min_luma_coding_block_size);
@@ -474,13 +490,17 @@ private:
             bit_writer_put_bits_uint32(bitwriter, seq->seq_fields.bits.pcm_loop_filter_disabled_flag, 1);
         }
 
-        bit_writer_put_ue(bitwriter, m_shortRFS.num_short_term_ref_pic_sets);
-        for (i = 0; i < m_shortRFS.num_short_term_ref_pic_sets; i++)
-            st_ref_pic_set(bitwriter, i, i, &m_shortRFS);
+        bit_writer_put_ue(bitwriter, m_encoder->m_shortRFS.num_short_term_ref_pic_sets);
+        for (i = 0; i < m_encoder->m_shortRFS.num_short_term_ref_pic_sets; i++)
+            st_ref_pic_set(bitwriter, i, i, m_encoder->m_shortRFS);
 
         /* long_term_ref_pics_present_flag */
         bit_writer_put_bits_uint32(bitwriter, 0, 1);
 
+        /*sps_temporal_mvp_enabled_flag*/
+        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+
+        /* strong_intra_smoothing_enabled_flag */
         bit_writer_put_bits_uint32(bitwriter, seq->seq_fields.bits.strong_intra_smoothing_enabled_flag, 1);
 
         /* vui_parameters_present_flag */
@@ -500,9 +520,6 @@ private:
     )
     {
         uint32_t deblocking_filter_control_present_flag  = 1;
-
-        /* nal_start_code */
-        bit_writer_put_bits_uint32(bitwriter, HEVC_NAL_START_CODE, 24);
 
         bit_writer_write_nal_header(bitwriter, PPS_NUT);
 
@@ -524,7 +541,7 @@ private:
         bit_writer_put_bits_uint32(bitwriter, pic->pic_fields.bits.sign_data_hiding_enabled_flag, 1);
 
         /* cabac_init_present_flag */
-        bit_writer_put_bits_uint32(bitwriter, 0, 1);
+        bit_writer_put_bits_uint32(bitwriter, 1, 1);
 
         bit_writer_put_ue(bitwriter, pic->num_ref_idx_l0_default_active_minus1);
         bit_writer_put_ue(bitwriter, pic->num_ref_idx_l1_default_active_minus1);
@@ -554,7 +571,6 @@ private:
 
         /* pps_slice_chroma_qp_offsets_present_flag */
         bit_writer_put_bits_uint32(bitwriter, 0, 1);
-
 
         /* weighted_pred_flag */
         bit_writer_put_bits_uint32(bitwriter, pic->pic_fields.bits.weighted_pred_flag, 1);
@@ -635,8 +651,15 @@ private:
             m_headers.insert(m_headers.end(), s, e);
             if (e == h.end())
                 break;
-            m_headers.insert(m_headers.end(), emulation, emulation + N_ELEMENTS(emulation));
+
             s = e + N_ELEMENTS(zeros);
+
+            /* only when bitstream contains 0x000000/0x000001/0x000002/0x000003
+               need to insert emulation prevention byte 0x03 */
+            if (*s <= 3)
+                m_headers.insert(m_headers.end(), emulation, emulation + N_ELEMENTS(emulation));
+            else
+                m_headers.insert(m_headers.end(), zeros, zeros + N_ELEMENTS(zeros));
          } while (1);
     }
 
@@ -644,6 +667,7 @@ private:
     Header m_sps;
     Header m_pps;
     Header m_headers;
+    VaapiEncoderHEVC* m_encoder;
 };
 
 class VaapiEncPictureHEVC:public VaapiEncPicture
@@ -1134,7 +1158,12 @@ void VaapiEncoderHEVC::setShortRFS(const VAEncSequenceParameterBufferHEVC *seq)
         m_shortRFS.num_positive_pics[1]      = 1;
     }
 
+#if 0
     m_shortRFS.num_short_term_ref_pic_sets = seq->ip_period + 1;
+#else
+m_shortRFS.num_short_term_ref_pic_sets = 0;
+#endif
+
     m_shortRFS.inter_ref_pic_set_prediction_flag = 0;
 
     for (i = 0; i < m_shortRFS.num_short_term_ref_pic_sets; i++) //First position stores low-delay B
@@ -1287,7 +1316,8 @@ bool VaapiEncoderHEVC::fill(VAEncPictureParameterBufferHEVC* picParam, const Pic
 
 bool VaapiEncoderHEVC::ensureSequenceHeader(const PicturePtr& picture,const VAEncSequenceParameterBufferHEVC* const sequence)
 {
-    m_headers.reset(new VaapiEncStreamHeaderHEVC());
+    m_headers.reset(new VaapiEncStreamHeaderHEVC(this));
+    m_headers->setVPS(sequence, profile());
     m_headers->setSPS(sequence, profile());
     return true;
 }
@@ -1382,6 +1412,8 @@ bool VaapiEncoderHEVC::addSliceHeaders (const PicturePtr& picture,
 
         /* set calculation for next slice */
         lastCtuIndex += curSliceCtus;
+
+        sliceParam->slice_fields.bits.slice_deblocking_filter_disabled_flag = 0;
 
         sliceParam->slice_fields.bits.last_slice_of_pic_flag = (lastCtuIndex == numCtus);
     }
