@@ -89,6 +89,11 @@ private:
     bool addSliceHeaders (const PicturePtr&,
                           const std::vector<ReferencePtr>& refList0,
                           const std::vector<ReferencePtr>& refList1) const;
+    bool addPackedSliceHeader (const PicturePtr&,
+                          const std::vector<ReferencePtr>& refList0,
+                          const std::vector<ReferencePtr>& refList1,
+                          const VAEncSliceParameterBufferHEVC* const sliceParam,
+                          uint32_t sliceIndex) const;
     bool ensureSequence(const PicturePtr&);
     bool ensurePicture (const PicturePtr&, const SurfacePtr&);
     bool ensureSlices(const PicturePtr&);
@@ -160,6 +165,9 @@ private:
     uint32_t m_confWinRightOffset;
     uint32_t m_confWinTopOffset;
     uint32_t m_confWinBottomOffset;
+
+    VAEncSequenceParameterBufferHEVC* m_seqParam;
+    VAEncPictureParameterBufferHEVC* m_picParam;
 
     ShortRFS m_shortRFS;
     StreamHeaderPtr m_headers;

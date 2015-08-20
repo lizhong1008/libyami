@@ -49,14 +49,60 @@ using std::vector;
 
 #define HEVC_NAL_START_CODE 0x000001
 
+#define HEVC_SLICE_TYPE_P           0
+#define HEVC_SLICE_TYPE_B           1
+#define HEVC_SLICE_TYPE_I            2
+
+
 #define VAAPI_ENCODER_HEVC_NAL_REF_IDC_NONE        0
 #define VAAPI_ENCODER_HEVC_NAL_REF_IDC_LOW         1
 #define VAAPI_ENCODER_HEVC_NAL_REF_IDC_MEDIUM      2
 #define VAAPI_ENCODER_HEVC_NAL_REF_IDC_HIGH        3
 
-#define  VPS_NUT    32
-#define  SPS_NUT    33
-#define  PPS_NUT    34
+typedef enum
+{
+    TRAIL_N = 0,
+    TRAIL_R,       // 1
+    TSA_N,         // 2
+    TSA_R,         // 3
+    STSA_N,        // 4
+    STSA_R,        // 5
+    RADL_N,        // 6
+    RADL_R,        // 7
+    RASL_N,        // 8
+    RASL_R,        // 9 
+    RSV_VCL_N10,   //10
+    RSV_VCL_N11,   //11
+    RSV_VCL_N12,   //12
+    RSV_VCL_N13,   //13
+    RSV_VCL_N14,   //14
+    RSV_VCL_N15,   //15
+    BLA_W_LP,      // 16
+    BLA_W_RADL,    // 17
+    BLA_N_LP,      // 18
+    IDR_W_RADL,    //19
+    IDR_N_LP,      //20
+    CRA_NUT,       //21
+    RSV_IRAP_VCL22, //22
+    RSV_IRAP_VCL23, //23
+    RSV_VCL24,     //24
+    RSV_VCL25,     //25
+    RSV_VCL26,     //26
+    RSV_VCL27,     //27
+    RSV_VCL28,     //28
+    RSV_VCL29,     //29
+    RSV_VCL30,     //30
+    RSV_VCL31,     //31
+    VPS_NUT,       //32
+    SPS_NUT,       //33
+    PPS_NUT,       //34
+    AUD_NUT,       //35
+    EOS_NUT,       //36
+    EOB_NUT,       //37
+    FD_NUT,        //38
+    PREFIX_SEI_NUT,//39
+    SUFFIX_SEI_NUT
+}NalUnitType;
 
 /* Get slice_type value for H.264 specification */
 static uint8_t
@@ -64,11 +110,11 @@ hevc_get_slice_type (VaapiPictureType type)
 {
     switch (type) {
     case VAAPI_PICTURE_TYPE_I:
-        return 2;
+        return HEVC_SLICE_TYPE_I;
     case VAAPI_PICTURE_TYPE_P:
-        return 0;
+        return HEVC_SLICE_TYPE_P;
     case VAAPI_PICTURE_TYPE_B:
-        return 1;
+        return HEVC_SLICE_TYPE_B;
     default:
         return -1;
     }
@@ -152,6 +198,23 @@ bit_writer_put_se(BitWriter *bitwriter, int32_t value)
 }
 
 static BOOL
+bit_writer_put_uv(BitWriter *bitwriter, uint32_t value, uint32_t max_value)
+{
+
+    uint32_t  size_in_bits = 0;
+
+    while (max_value > (1 << size_in_bits)) {
+        ++size_in_bits;
+    }
+    
+    if (!bit_writer_put_bits_uint32(bitwriter, value, size_in_bits))
+        return FALSE;
+
+    return TRUE;
+}
+
+
+static BOOL
 bit_writer_write_nal_header(
     BitWriter *bitwriter,
     uint32_t nal_unit_type
@@ -230,6 +293,48 @@ static void profile_tier_level(
     }
 }
 
+void st_ref_pic_set(BitWriter *bs, int stRpsIdx, int refIdx, const ShortRFS shortRFS)
+{
+    int i;
+    if (stRpsIdx)
+        bit_writer_put_bits_uint32(bs, shortRFS.inter_ref_pic_set_prediction_flag, 1);
+
+    if (shortRFS.inter_ref_pic_set_prediction_flag)
+    {
+#if 0
+        if (stRpsIdx == ps->num_short_term_ref_pic_sets)
+            bitstream_put_ue(bs, ps->delta_idx_minus1);
+
+        bitstream_put_ui(bs, ps->delta_rps_sign, 1);
+        bitstream_put_ue(bs, ps->abs_delta_rps_minus1);
+
+        for (j = 0; j <= ps->NumDeltaPocs[RefRpsIdx]; j++)
+        {
+            bitstream_put_ui(bs, ps->used_by_curr_pic_flag[j], 1);
+
+            if(!ps->used_by_curr_pic_flag[j])
+                bitstream_put_ui(bs, ps->use_delta_flag[j], 1);
+        }
+#endif
+    } else {
+        bit_writer_put_ue(bs, shortRFS.num_negative_pics);
+        bit_writer_put_ue(bs, shortRFS.num_positive_pics[refIdx==0?0:1]);
+
+        for (i = 0; i < shortRFS.num_negative_pics; i++)
+        {
+            bit_writer_put_ue(bs, shortRFS.delta_poc_s0_minus1[i]);
+            bit_writer_put_bits_uint32(bs, shortRFS.used_by_curr_pic_s0_flag[i], 1);
+        }
+        for (i = 0; i < shortRFS.num_positive_pics[refIdx==0?0:1]; i++)
+        {
+            bit_writer_put_ue(bs, shortRFS.delta_poc_s1_minus1[i]);
+            bit_writer_put_bits_uint32(bs, shortRFS.used_by_curr_pic_s1_flag[i], 1);
+        }
+    }
+
+    return;
+}
+
 
 class VaapiEncStreamHeaderHEVC
 {
@@ -239,22 +344,22 @@ public:
     VaapiEncStreamHeaderHEVC();
     VaapiEncStreamHeaderHEVC(VaapiEncoderHEVC* encoder) {m_encoder = encoder;};
 
-    void setVPS(const VAEncSequenceParameterBufferHEVC* const sequence, VaapiProfile profile)
+    void setVPS(const VAEncSequenceParameterBufferHEVC* const sequence)
     {
         ASSERT(m_vps.empty());
         BitWriter bs;
         bit_writer_init (&bs, 128 * 8);
-        bit_writer_write_vps (&bs, sequence, profile);
+        bit_writer_write_vps (&bs, sequence);
         bsToHeader(m_vps, bs);
         bit_writer_clear (&bs, TRUE);
     }
 
-    void setSPS(const VAEncSequenceParameterBufferHEVC* const sequence, VaapiProfile profile)
+    void setSPS(const VAEncSequenceParameterBufferHEVC* const sequence)
     {
         ASSERT(m_vps.size() && m_sps.empty());
         BitWriter bs;
         bit_writer_init (&bs, 128 * 8);
-        bit_writer_write_sps (&bs, sequence, profile);
+        bit_writer_write_sps (&bs, sequence);
         bsToHeader(m_sps, bs);
         bit_writer_clear (&bs, TRUE);
     }
@@ -300,8 +405,7 @@ public:
 private:
     BOOL bit_writer_write_vps (
         BitWriter *bitwriter,
-        const VAEncSequenceParameterBufferHEVC* const seq,
-        VaapiProfile profile
+        const VAEncSequenceParameterBufferHEVC* const seq
     )
     {
         BOOL vps_timing_info_present_flag = 0;
@@ -360,52 +464,9 @@ private:
         return TRUE;
     }
 
-    void st_ref_pic_set(BitWriter *bs, int stRpsIdx, int refIdx, const ShortRFS shortRFS)
-    {
-        int i;
-        if (stRpsIdx)
-            bit_writer_put_bits_uint32(bs, shortRFS.inter_ref_pic_set_prediction_flag, 1);
-
-        if (shortRFS.inter_ref_pic_set_prediction_flag)
-        {
-#if 0
-            if (stRpsIdx == ps->num_short_term_ref_pic_sets)
-                bitstream_put_ue(bs, ps->delta_idx_minus1);
-
-            bitstream_put_ui(bs, ps->delta_rps_sign, 1);
-            bitstream_put_ue(bs, ps->abs_delta_rps_minus1);
-
-            for (j = 0; j <= ps->NumDeltaPocs[RefRpsIdx]; j++)
-            {
-                bitstream_put_ui(bs, ps->used_by_curr_pic_flag[j], 1);
-
-                if(!ps->used_by_curr_pic_flag[j])
-                    bitstream_put_ui(bs, ps->use_delta_flag[j], 1);
-            }
-#endif
-        } else {
-            bit_writer_put_ue(bs, shortRFS.num_negative_pics);
-            bit_writer_put_ue(bs, shortRFS.num_positive_pics[refIdx==0?0:1]);
-
-            for (i = 0; i < shortRFS.num_negative_pics; i++)
-            {
-                bit_writer_put_ue(bs, shortRFS.delta_poc_s0_minus1[i]);
-                bit_writer_put_bits_uint32(bs, shortRFS.used_by_curr_pic_s0_flag[i], 1);
-            }
-            for (i = 0; i < shortRFS.num_positive_pics[refIdx==0?0:1]; i++)
-            {
-                bit_writer_put_ue(bs, shortRFS.delta_poc_s1_minus1[i]);
-                bit_writer_put_bits_uint32(bs, shortRFS.used_by_curr_pic_s1_flag[i], 1);
-            }
-        }
-
-        return;
-    }
-
     BOOL bit_writer_write_sps(
         BitWriter *bitwriter,
-        const VAEncSequenceParameterBufferHEVC* const seq,
-        VaapiProfile profile
+        const VAEncSequenceParameterBufferHEVC* const seq
     )
     {
         uint32_t i = 0;
@@ -603,9 +664,9 @@ private:
         bit_writer_put_bits_uint32(bitwriter, deblocking_filter_control_present_flag, 1);
         if (deblocking_filter_control_present_flag) {
             /* deblocking_filter_override_enabled_flag */
-            bit_writer_put_bits_uint32(bitwriter, 1, 1);
+            bit_writer_put_bits_uint32(bitwriter, 0, 1);
             /* pps_deblocking_filter_disabled_flag */
-            bit_writer_put_bits_uint32(bitwriter, 1, 1);
+            bit_writer_put_bits_uint32(bitwriter, 0, 1);
         }
 
         /* scaling_list_data_present_flag */
@@ -1251,6 +1312,7 @@ bool VaapiEncoderHEVC::fill(VAEncPictureParameterBufferHEVC* picParam, const Pic
 
     picParam->decoded_curr_pic.picture_id = surface->getID();
     picParam->decoded_curr_pic.flags = VA_PICTURE_HEVC_RPS_LT_CURR;
+    picParam->decoded_curr_pic.pic_order_cnt = picture->m_poc;
 
     if (picture->m_type != VAAPI_PICTURE_TYPE_I) {
         list<ReferencePtr>::const_iterator it;
@@ -1323,8 +1385,8 @@ bool VaapiEncoderHEVC::fill(VAEncPictureParameterBufferHEVC* picParam, const Pic
 bool VaapiEncoderHEVC::ensureSequenceHeader(const PicturePtr& picture,const VAEncSequenceParameterBufferHEVC* const sequence)
 {
     m_headers.reset(new VaapiEncStreamHeaderHEVC(this));
-    m_headers->setVPS(sequence, profile());
-    m_headers->setSPS(sequence, profile());
+    m_headers->setVPS(sequence);
+    m_headers->setSPS(sequence);
     return true;
 }
 
@@ -1339,7 +1401,8 @@ bool VaapiEncoderHEVC::ensurePictureHeader(const PicturePtr& picture, const VAEn
 static void fillReferenceList(VAEncSliceParameterBufferHEVC* slice, const vector<ReferencePtr>& refList, uint32_t index)
 {
     VAPictureHEVC* picList;
-    int total;
+    uint32_t total;
+    uint32_t i = 0;
     if (!index) {
         picList = slice->ref_pic_list0;
         total = N_ELEMENTS(slice->ref_pic_list0);
@@ -1348,11 +1411,95 @@ static void fillReferenceList(VAEncSliceParameterBufferHEVC* slice, const vector
         picList = slice->ref_pic_list0;
         total = N_ELEMENTS(slice->ref_pic_list0);
     }
-    int i = 0;
     for (; i < refList.size(); i++)
         picList[i].picture_id = refList[i]->m_pic->getID();
     for (; i <total; i++)
         picList[i].picture_id = VA_INVALID_SURFACE;
+}
+
+bool VaapiEncoderHEVC::addPackedSliceHeader(const PicturePtr& picture,
+                                        const vector<ReferencePtr>& refList0,
+                                        const vector<ReferencePtr>& refList1,
+                                        const VAEncSliceParameterBufferHEVC* const sliceParam,
+                                        uint32_t sliceIndex) const
+{
+    BitWriter bs;
+    BOOL short_term_ref_pic_set_sps_flag = !!m_shortRFS.num_short_term_ref_pic_sets;
+    NalUnitType nalUnitType = (picture->isIdr() ? IDR_W_RADL : TRAIL_R );
+    bit_writer_init (&bs, 128 * 8);
+    bit_writer_put_bits_uint32(&bs, HEVC_NAL_START_CODE, 32);
+    bit_writer_write_nal_header(&bs, nalUnitType);
+
+    /* first_slice_segment_in_pic_flag */
+    bit_writer_put_bits_uint32(&bs, sliceIndex == 0, 1);
+
+    /* no_output_of_prior_pics_flag */
+    if (nalUnitType >=  BLA_W_LP && nalUnitType <= RSV_IRAP_VCL23 )
+        bit_writer_put_bits_uint32(&bs, 1, 1);
+        
+    /* slice_pic_parameter_set_id */
+    bit_writer_put_ue(&bs, 0);
+
+
+    if (sliceIndex) {
+        /* don't support dependent_slice_segments_enabled_flag right now*/
+        ASSERT (!m_picParam->pic_fields.bits.dependent_slice_segments_enabled_flag &&
+                      !sliceParam->slice_fields.bits.dependent_slice_segment_flag);
+
+        bit_writer_put_uv(&bs, sliceParam->slice_segment_address, sliceParam->num_ctu_in_slice);
+    }
+
+    if (!sliceParam->slice_fields.bits.dependent_slice_segment_flag) {
+        bit_writer_put_ue(&bs, sliceParam->slice_type);
+
+        ASSERT(!m_seqParam->seq_fields.bits.separate_colour_plane_flag);
+
+        if (nalUnitType != IDR_W_RADL && nalUnitType != IDR_N_LP) {
+            bit_writer_put_uv(&bs, m_picParam->decoded_curr_pic.pic_order_cnt , m_log2MaxPicOrderCnt);
+            
+            bit_writer_put_bits_uint32(&bs, short_term_ref_pic_set_sps_flag, 1);
+            if (!short_term_ref_pic_set_sps_flag)
+                st_ref_pic_set(&bs, m_shortRFS.num_short_term_ref_pic_sets, 0, m_shortRFS);
+            else if (m_shortRFS.num_short_term_ref_pic_sets > 1)
+                bit_writer_put_uv(&bs, m_shortRFS.short_term_ref_pic_set_idx, m_shortRFS.num_short_term_ref_pic_sets);
+            /* long_term_ref_pics_present_flag is set to 0 */
+
+            if (sliceParam->slice_type != HEVC_SLICE_TYPE_I) {
+                bit_writer_put_bits_uint32(&bs, sliceParam->slice_fields.bits.num_ref_idx_active_override_flag, 1);
+                if (sliceParam->slice_fields.bits.num_ref_idx_active_override_flag) {
+                    bit_writer_put_ue(&bs, sliceParam->num_ref_idx_l0_active_minus1);
+                    if (sliceParam->slice_type == HEVC_SLICE_TYPE_B )
+                        bit_writer_put_ue(&bs, sliceParam->num_ref_idx_l1_active_minus1);
+                }
+                /* pps lists_modification_present_flag is set to 0 */
+                if (sliceParam->slice_type == HEVC_SLICE_TYPE_B)
+                    bit_writer_put_bits_uint32(&bs, sliceParam->slice_fields.bits.mvd_l1_zero_flag, 1);
+                if (sliceParam->slice_fields.bits.cabac_init_flag)
+                    bit_writer_put_bits_uint32(&bs, sliceParam->slice_fields.bits.cabac_init_flag, 1);
+
+                /*  slice_temporal_mvp_enabled_flag and weighted_pred_flag are set to 0*/
+                ASSERT(!sliceParam->slice_fields.bits.slice_temporal_mvp_enabled_flag &&
+                             !m_picParam->pic_fields.bits.weighted_bipred_flag);
+                
+                ASSERT(sliceParam->max_num_merge_cand <= 5);
+                bit_writer_put_ue(&bs, 5 - sliceParam->max_num_merge_cand);
+            }
+        }
+        
+        bit_writer_put_ue(&bs, sliceParam->slice_qp_delta);
+        /* pps_slice_chroma_qp_offsets_present_flag is set to 1 */
+        bit_writer_put_ue(&bs, sliceParam->slice_cb_qp_offset);
+        bit_writer_put_ue(&bs, sliceParam->slice_cr_qp_offset);
+        /* deblocking_filter_override_enabled_flag and 
+           * pps_loop_filter_across_slices_enabled_flag are set to 0 */
+    }
+    
+    bit_writer_write_trailing_bits(&bs);
+     
+     if(!picture->addPackedHeader(VAEncPackedHeaderSlice, bs.data, bs.bit_size))
+         return false;
+     
+     return true;
 }
 
 /* Adds slice headers to picture */
@@ -1391,7 +1538,7 @@ bool VaapiEncoderHEVC::addSliceHeaders (const PicturePtr& picture,
         if (!picture->newSlice(sliceParam))
             return false;
 
-        sliceParam->slice_segment_address= lastCtuIndex;
+        sliceParam->slice_segment_address = lastCtuIndex;
         sliceParam->num_ctu_in_slice = curSliceCtus;
         sliceParam->slice_type = hevc_get_slice_type (picture->m_type);
         assert (sliceParam->slice_type != -1);
@@ -1413,8 +1560,8 @@ bool VaapiEncoderHEVC::addSliceHeaders (const PicturePtr& picture,
         sliceParam->slice_qp_delta = 0;
 
         /* slice_beta_offset_div2 and slice_tc_offset_div2  should be the range [-6, 6] */
-        sliceParam->slice_beta_offset_div2 = 2;
-        sliceParam->slice_tc_offset_div2 = 2;
+        sliceParam->slice_beta_offset_div2 = 0;
+        sliceParam->slice_tc_offset_div2 = 0;
 
         /* set calculation for next slice */
         lastCtuIndex += curSliceCtus;
@@ -1422,8 +1569,11 @@ bool VaapiEncoderHEVC::addSliceHeaders (const PicturePtr& picture,
         sliceParam->slice_fields.bits.slice_deblocking_filter_disabled_flag = 1;
 
         sliceParam->slice_fields.bits.last_slice_of_pic_flag = (lastCtuIndex == numCtus);
+
+        addPackedSliceHeader(picture, refList0, refList1, sliceParam, i);
     }
     assert (lastCtuIndex == numCtus);
+    
     return true;
 }
 
@@ -1433,33 +1583,32 @@ bool VaapiEncoderHEVC::ensureSequence(const PicturePtr& picture)
         return true;
     }
 
-    VAEncSequenceParameterBufferHEVC* seqParam;
-
-    if (!picture->editSequence(seqParam) || !fill(seqParam)) {
+    if (!picture->editSequence(m_seqParam) || !fill(m_seqParam)) {
         ERROR("failed to create sequence parameter buffer (SPS)");
         return false;
     }
 
-    if (!ensureSequenceHeader(picture, seqParam)) {
+    if (!ensureSequenceHeader(picture, m_seqParam)) {
         ERROR ("failed to create packed sequence header buffer");
         return false;
     }
+
     return true;
 }
 
 bool VaapiEncoderHEVC::ensurePicture (const PicturePtr& picture, const SurfacePtr& surface)
 {
-    VAEncPictureParameterBufferHEVC *picParam;
 
-    if (!picture->editPicture(picParam) || !fill(picParam, picture, surface)) {
+    if (!picture->editPicture(m_picParam) || !fill(m_picParam, picture, surface)) {
         ERROR("failed to create picture parameter buffer (PPS)");
         return false;
     }
 
-    if (picture->isIdr() && !ensurePictureHeader (picture, picParam)) {
+    if (picture->isIdr() && !ensurePictureHeader (picture, m_picParam)) {
             ERROR ("set picture packed header failed");
             return false;
     }
+
     return true;
 }
 
