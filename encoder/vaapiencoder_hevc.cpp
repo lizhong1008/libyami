@@ -49,8 +49,8 @@ using std::vector;
 
 #define HEVC_NAL_START_CODE 0x000001
 
-#define HEVC_SLICE_TYPE_P           0
-#define HEVC_SLICE_TYPE_B           1
+#define HEVC_SLICE_TYPE_P           1
+#define HEVC_SLICE_TYPE_B           0
 #define HEVC_SLICE_TYPE_I            2
 
 
@@ -206,7 +206,7 @@ bit_writer_put_uv(BitWriter *bitwriter, uint32_t value, uint32_t max_value)
     while (max_value > (1 << size_in_bits)) {
         ++size_in_bits;
     }
-    
+    printf("put_uv: value: %d\t, size_in_bits: %d\n", value, size_in_bits);
     if (!bit_writer_put_bits_uint32(bitwriter, value, size_in_bits))
         return FALSE;
 
@@ -299,37 +299,20 @@ void st_ref_pic_set(BitWriter *bs, int stRpsIdx, int refIdx, const ShortRFS shor
     if (stRpsIdx)
         bit_writer_put_bits_uint32(bs, shortRFS.inter_ref_pic_set_prediction_flag, 1);
 
-    if (shortRFS.inter_ref_pic_set_prediction_flag)
+    ASSERT(!shortRFS.inter_ref_pic_set_prediction_flag);
+
+    bit_writer_put_ue(bs, shortRFS.num_negative_pics);
+    bit_writer_put_ue(bs, shortRFS.num_positive_pics);
+
+    for (i = 0; i < shortRFS.num_negative_pics; i++)
     {
-#if 0
-        if (stRpsIdx == ps->num_short_term_ref_pic_sets)
-            bitstream_put_ue(bs, ps->delta_idx_minus1);
-
-        bitstream_put_ui(bs, ps->delta_rps_sign, 1);
-        bitstream_put_ue(bs, ps->abs_delta_rps_minus1);
-
-        for (j = 0; j <= ps->NumDeltaPocs[RefRpsIdx]; j++)
-        {
-            bitstream_put_ui(bs, ps->used_by_curr_pic_flag[j], 1);
-
-            if(!ps->used_by_curr_pic_flag[j])
-                bitstream_put_ui(bs, ps->use_delta_flag[j], 1);
-        }
-#endif
-    } else {
-        bit_writer_put_ue(bs, shortRFS.num_negative_pics);
-        bit_writer_put_ue(bs, shortRFS.num_positive_pics[refIdx==0?0:1]);
-
-        for (i = 0; i < shortRFS.num_negative_pics; i++)
-        {
-            bit_writer_put_ue(bs, shortRFS.delta_poc_s0_minus1[i]);
-            bit_writer_put_bits_uint32(bs, shortRFS.used_by_curr_pic_s0_flag[i], 1);
-        }
-        for (i = 0; i < shortRFS.num_positive_pics[refIdx==0?0:1]; i++)
-        {
-            bit_writer_put_ue(bs, shortRFS.delta_poc_s1_minus1[i]);
-            bit_writer_put_bits_uint32(bs, shortRFS.used_by_curr_pic_s1_flag[i], 1);
-        }
+        bit_writer_put_ue(bs, shortRFS.delta_poc_s0_minus1[i]);
+        bit_writer_put_bits_uint32(bs, shortRFS.used_by_curr_pic_s0_flag[i], 1);
+    }
+    for (i = 0; i < shortRFS.num_positive_pics; i++)
+    {
+        bit_writer_put_ue(bs, shortRFS.delta_poc_s1_minus1[i]);
+        bit_writer_put_bits_uint32(bs, shortRFS.used_by_curr_pic_s1_flag[i], 1);
     }
 
     return;
@@ -604,7 +587,7 @@ private:
         bit_writer_put_bits_uint32(bitwriter, pic->pic_fields.bits.sign_data_hiding_enabled_flag, 1);
 
         /* cabac_init_present_flag */
-        bit_writer_put_bits_uint32(bitwriter, 1, 1);
+        bit_writer_put_bits_uint32(bitwriter, 0, 1);
 
         bit_writer_put_ue(bitwriter, pic->num_ref_idx_l0_default_active_minus1);
         bit_writer_put_ue(bitwriter, pic->num_ref_idx_l1_default_active_minus1);
@@ -885,7 +868,8 @@ void VaapiEncoderHEVC::resetParams ()
     }
 
 
-    if (keyFramePeriod() < intraPeriod())
+    /* FIXME: we set all I frame to be IDR frame right now */
+    //if (keyFramePeriod() < intraPeriod())
         keyFramePeriod() = intraPeriod();
     if (keyFramePeriod() > MAX_IDR_PERIOD)
         keyFramePeriod() = MAX_IDR_PERIOD;
@@ -1038,7 +1022,7 @@ Encode_Status VaapiEncoderHEVC::reorder(const SurfacePtr& surface, uint64_t time
 
     ++m_curPresentIndex;
     PicturePtr picture(new VaapiEncPictureHEVC(m_context, surface, timeStamp));
-    picture->m_poc = ((m_curPresentIndex * 2) % m_maxPicOrderCnt);
+    picture->m_poc = ((m_curPresentIndex) % m_maxPicOrderCnt);
 
     bool isIdr = (m_frameIndex == 0 ||m_frameIndex >= keyFramePeriod() || forceKeyFrame);
 
@@ -1215,35 +1199,29 @@ void VaapiEncoderHEVC::referenceListFree()
 void VaapiEncoderHEVC::setShortRFS()
 {
     int i;
-    int intra_idr_period = intraPeriod();
-    int ip_period = 1 + m_numBFrames;
+ 
+    memset(&m_shortRFS, 0, sizeof(m_shortRFS));
 
-    if (intra_idr_period > 1 && ip_period == 0)
-    {
+    if (intraPeriod() > 1) {
         m_shortRFS.num_negative_pics         = 1;
-        m_shortRFS.num_positive_pics[0]      = 0;
-    } else {
-        m_shortRFS.num_negative_pics         = 1;
-        m_shortRFS.num_positive_pics[0]      = 0;
-        m_shortRFS.num_positive_pics[1]      = 1;
+        if (m_numBFrames )
+            m_shortRFS.num_positive_pics      = 1;
     }
 
-#if 0
-    m_shortRFS.num_short_term_ref_pic_sets = seq->ip_period + 1;
-#else
-m_shortRFS.num_short_term_ref_pic_sets = 0;
-#endif
+    m_shortRFS.num_short_term_ref_pic_sets = 1;
 
     m_shortRFS.inter_ref_pic_set_prediction_flag = 0;
 
-    for (i = 0; i < m_shortRFS.num_short_term_ref_pic_sets; i++) //First position stores low-delay B
+    for (i = 0; i < m_shortRFS.num_short_term_ref_pic_sets; i++)
     {
-        //Poc S0 is the reference distance b/t I pic and low-delay B or B pics.
-        m_shortRFS.delta_poc_s0_minus1[i]                 = (i == 0) ? ip_period : (i-1);
+        m_shortRFS.delta_poc_s0_minus1[i]                 = 0;
         m_shortRFS.used_by_curr_pic_s0_flag[i]            = 1;
-        //Poc S1 is the reference distance b/t P pic and low-delay B pics
-        m_shortRFS.delta_poc_s1_minus1[i]                 = (i == 0) ? 0 : (ip_period-i);
-        m_shortRFS.used_by_curr_pic_s1_flag[i]            = 1;
+
+        /*FIXME*/
+        if (m_numBFrames) {
+            m_shortRFS.delta_poc_s1_minus1[i]                 = 0;
+            m_shortRFS.used_by_curr_pic_s1_flag[i]            = 1;
+        }
     }
 }
 
@@ -1319,6 +1297,7 @@ bool VaapiEncoderHEVC::fill(VAEncPictureParameterBufferHEVC* picParam, const Pic
         for (it = m_refList.begin(); it != m_refList.end(); ++it) {
             assert(*it && (*it)->m_pic && ((*it)->m_pic->getID() != VA_INVALID_ID));
             picParam->reference_frames[i].picture_id = (*it)->m_pic->getID();
+            printf("Rerference_Index: %d\t, Referenc_ID: %x\n", i, picParam->reference_frames[i].picture_id);
             ++i;
         }
     }
@@ -1408,8 +1387,8 @@ static void fillReferenceList(VAEncSliceParameterBufferHEVC* slice, const vector
         total = N_ELEMENTS(slice->ref_pic_list0);
     }
     else {
-        picList = slice->ref_pic_list0;
-        total = N_ELEMENTS(slice->ref_pic_list0);
+        picList = slice->ref_pic_list1;
+        total = N_ELEMENTS(slice->ref_pic_list1);
     }
     for (; i < refList.size(); i++)
         picList[i].picture_id = refList[i]->m_pic->getID();
@@ -1455,8 +1434,8 @@ bool VaapiEncoderHEVC::addPackedSliceHeader(const PicturePtr& picture,
         ASSERT(!m_seqParam->seq_fields.bits.separate_colour_plane_flag);
 
         if (nalUnitType != IDR_W_RADL && nalUnitType != IDR_N_LP) {
-            bit_writer_put_uv(&bs, m_picParam->decoded_curr_pic.pic_order_cnt , m_log2MaxPicOrderCnt);
-            
+            bit_writer_put_bits_uint32(&bs, m_picParam->decoded_curr_pic.pic_order_cnt , m_log2MaxPicOrderCnt);
+            printf("slice_poc is %d, log2_max_poc is: %d\n", m_picParam->decoded_curr_pic.pic_order_cnt, m_log2MaxPicOrderCnt );
             bit_writer_put_bits_uint32(&bs, short_term_ref_pic_set_sps_flag, 1);
             if (!short_term_ref_pic_set_sps_flag)
                 st_ref_pic_set(&bs, m_shortRFS.num_short_term_ref_pic_sets, 0, m_shortRFS);

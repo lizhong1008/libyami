@@ -42,7 +42,7 @@ class VaapiEncStreamHeaderHEVC;
 typedef struct shortRFS
 {
     unsigned char    num_negative_pics;
-    unsigned char    num_positive_pics[2];
+    unsigned char    num_positive_pics;
     unsigned char    delta_poc_s0_minus1[8];
     unsigned char    used_by_curr_pic_s0_flag[8];
     unsigned char    delta_poc_s1_minus1[8];
