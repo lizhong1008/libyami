@@ -100,7 +100,7 @@ private:
     //reference list related
     Encode_Status reorder(const SurfacePtr& surface, uint64_t timeStamp, bool forceKeyFrame);
     bool referenceListUpdate (const PicturePtr&, const SurfacePtr&);
-    bool sliceReferenceListUpdate (const PicturePtr&);
+    bool pictureReferenceListSet (const PicturePtr&);
 
     void referenceListFree();
     //template end
@@ -115,7 +115,8 @@ private:
     void setIdrFrame(const PicturePtr&);
     void setIntraFrame(const PicturePtr&, bool idIdr);
     void resetParams();
-    void setShortRFS();
+    void setShortRfs();
+    void ShortRfsUpdate(const PicturePtr&);
 
     VideoParamsAVC m_videoParamAVC;
 

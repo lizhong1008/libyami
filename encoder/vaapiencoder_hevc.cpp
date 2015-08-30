@@ -828,7 +828,7 @@ void VaapiEncoderHEVC::resetParams ()
     m_profileIdc = hevc_get_profile_idc(profile());
 
     //FIXME:
-    m_numBFrames = 0;
+    m_numBFrames = 1;
     m_numSlices = 1;
 
     assert (width() && height());
@@ -882,7 +882,7 @@ void VaapiEncoderHEVC::resetParams ()
 
     INFO("m_maxRefFrames: %d", m_maxRefFrames);
 
-    setShortRFS();
+    setShortRfs();
 
     resetGopStart();
 }
@@ -1048,7 +1048,6 @@ Encode_Status VaapiEncoderHEVC::doEncode(const SurfacePtr& surface, uint64_t tim
         printf("m_reorderFrameList size: %d\n", m_reorderFrameList.size());
         PicturePtr picture = m_reorderFrameList.front();
         m_reorderFrameList.pop_front();
-        printf("m_reorderFrameList size: %d\n", m_reorderFrameList.size());
         picture->m_codedBuffer = codedBuffer;
 
         if (m_reorderFrameList.empty())
@@ -1144,17 +1143,32 @@ referenceListUpdate (const PicturePtr& picture, const SurfacePtr& surface)
     return true;
 }
 
-bool  VaapiEncoderHEVC::sliceReferenceListUpdate (
+bool  VaapiEncoderHEVC::pictureReferenceListSet (
     const PicturePtr& picture)
 {
-    assert(picture->m_type == VAAPI_PICTURE_TYPE_P);
-    m_refList0 = m_refList;
+    uint32_t i;
+    /* reset reflist0 and reflist1 every time  */
+    m_refList0.clear();
+    m_refList1.clear();
+
+    for (i = 0; i < m_refList.size(); i++) {
+        assert(picture->m_poc != m_refList[i]->m_poc);
+        if (picture->m_poc > m_refList[i]->m_poc) {
+            /* set forward reflist */
+            m_refList0.push_front(m_refList[i]);
+            if (m_refList0.size() > m_maxRefList0Count)
+                m_refList0.pop_back();
+        } else {
+            /* set backward reflist */
+            m_refList1.push_front(m_refList[i]);
+            if (m_refList1.size() > m_maxRefList1Count)
+                m_refList1.pop_back();
+        }
+    }
+
+    ShortRfsUpdate(picture);
 
     assert (m_refList0.size() + m_refList1.size() <= m_maxRefFrames);
-    if (m_refList0.size() > m_maxRefList0Count)
-        m_refList0.pop_back();
-    if (m_refList1.size() > m_maxRefList1Count)
-        m_refList1.pop_back();
 
     return true;
 }
@@ -1166,7 +1180,41 @@ void VaapiEncoderHEVC::referenceListFree()
     m_refList1.clear();
 }
 
-void VaapiEncoderHEVC::setShortRFS()
+void VaapiEncoderHEVC::ShortRfsUpdate(const PicturePtr& picture)
+{
+    int i;
+ 
+    memset(&m_shortRFS, 0, sizeof(m_shortRFS));
+
+    m_shortRFS.num_short_term_ref_pic_sets = 0;
+    m_shortRFS.inter_ref_pic_set_prediction_flag = 0;
+
+    if (intraPeriod() > 1 && m_refList0.size()) {
+        m_shortRFS.num_negative_pics         = 1;
+        m_shortRFS.delta_poc_s0_minus1[0]  = picture->m_poc - m_refList0[0]->m_poc - 1;
+        m_shortRFS.used_by_curr_pic_s0_flag[0] = 1;
+        if (m_numBFrames && m_refList1.size()) {
+            m_shortRFS.num_positive_pics      = 1;
+            m_shortRFS.delta_poc_s1_minus1[0]  = m_refList1[0]->m_poc - picture->m_poc - 1;
+            m_shortRFS.used_by_curr_pic_s1_flag[0]            = 1;
+        }
+    }
+
+    for (i = 1; i < m_shortRFS.num_negative_pics; i++)
+    {
+        m_shortRFS.delta_poc_s0_minus1[i]                 = 0;
+        m_shortRFS.used_by_curr_pic_s0_flag[i]            = 1;
+    }
+
+    for (i = 1; i < m_shortRFS.num_positive_pics; i++) {
+        m_shortRFS.delta_poc_s1_minus1[i]                 = 0;
+        m_shortRFS.used_by_curr_pic_s1_flag[i]            = 1;
+    }
+ 
+}
+
+
+void VaapiEncoderHEVC::setShortRfs()
 {
     int i;
  
@@ -1265,15 +1313,22 @@ bool VaapiEncoderHEVC::fill(VAEncPictureParameterBufferHEVC* picParam, const Pic
     picParam->decoded_curr_pic.flags = VA_PICTURE_HEVC_RPS_LT_CURR;
     picParam->decoded_curr_pic.pic_order_cnt = picture->m_poc;
 
-    if (picture->m_type != VAAPI_PICTURE_TYPE_I) {
-        for (i = 0; i < m_refList.size(); i++) {
-            assert(m_refList[i] && m_refList[i]->m_pic && (m_refList[i]->m_pic->getID() != VA_INVALID_ID));
-            picParam->reference_frames[i].picture_id = m_refList[i]->m_pic->getID();
-        }
-    }
-    for (; i < 16; ++i) {
+    for (i = 0; i < 16; ++i) {
         picParam->reference_frames[i].picture_id = VA_INVALID_ID;
     }
+
+    if (picture->m_type != VAAPI_PICTURE_TYPE_I) {
+        if (m_refList0.size()) {
+            picParam->reference_frames[0].picture_id = m_refList0[0]->m_pic->getID();
+            picParam->reference_frames[0].pic_order_cnt= m_refList0[0]->m_poc;
+        }
+        if (picture->m_type == VAAPI_PICTURE_TYPE_B &&  m_refList1.size()) {
+            picParam->reference_frames[1].picture_id = m_refList1[0]->m_pic->getID();
+            picParam->reference_frames[1].pic_order_cnt= m_refList1[0]->m_poc;
+        }
+    }
+
+    
     picParam->coded_buf = picture->m_codedBuffer->getID();
 
     /*collocated_ref_pic_index should be 0xff  when element slice_temporal_mvp_enable_flag is 0 */
@@ -1350,13 +1405,19 @@ bool VaapiEncoderHEVC::ensurePictureHeader(const PicturePtr& picture, const VAEn
 bool VaapiEncoderHEVC:: fillReferenceList(VAEncSliceParameterBufferHEVC* slice) const
 {
     uint32_t i = 0;
-    for (i = 0; i < m_refList0.size(); i++)
+    for (i = 0; i < m_refList0.size(); i++) {
+        assert(m_refList0[i] && m_refList0[i]->m_pic && (m_refList0[i]->m_pic->getID() != VA_INVALID_ID));
         slice->ref_pic_list0[i].picture_id = m_refList0[i]->m_pic->getID();
+        slice->ref_pic_list0[i].pic_order_cnt= m_refList0[i]->m_poc;
+    }
     for (; i < N_ELEMENTS(slice->ref_pic_list0); i++)
         slice->ref_pic_list0[i].picture_id = VA_INVALID_SURFACE;
 
-    for (i = 0; i < m_refList1.size(); i++)
+    for (i = 0; i < m_refList1.size(); i++){
+        assert(m_refList1[i] && m_refList1[i]->m_pic && (m_refList1[i]->m_pic->getID() != VA_INVALID_ID));
         slice->ref_pic_list1[i].picture_id = m_refList1[i]->m_pic->getID();
+        slice->ref_pic_list1[i].pic_order_cnt= m_refList1[i]->m_poc;
+    }
     for (; i < N_ELEMENTS(slice->ref_pic_list1); i++)
         slice->ref_pic_list1[i].picture_id = VA_INVALID_SURFACE;
     return true;
@@ -1538,6 +1599,12 @@ bool VaapiEncoderHEVC::ensureSequence(const PicturePtr& picture)
 bool VaapiEncoderHEVC::ensurePicture (const PicturePtr& picture, const SurfacePtr& surface)
 {
 
+    if (picture->m_type != VAAPI_PICTURE_TYPE_I &&
+            !pictureReferenceListSet(picture)) {
+        ERROR ("reference list reorder failed");
+        return false;
+    }
+
     if (!picture->editPicture(m_picParam) || !fill(m_picParam, picture, surface)) {
         ERROR("failed to create picture parameter buffer (PPS)");
         return false;
@@ -1555,11 +1622,6 @@ bool VaapiEncoderHEVC::ensureSlices(const PicturePtr& picture)
 {
     assert (picture);
 
-    if (picture->m_type != VAAPI_PICTURE_TYPE_I &&
-            !sliceReferenceListUpdate(picture)) {
-        ERROR ("reference list reorder failed");
-        return false;
-    }
     if (!addSliceHeaders (picture))
         return false;
     return true;
