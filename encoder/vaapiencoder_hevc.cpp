@@ -49,10 +49,9 @@ using std::vector;
 
 #define HEVC_NAL_START_CODE 0x000001
 
+#define HEVC_SLICE_TYPE_I            2
 #define HEVC_SLICE_TYPE_P           1
 #define HEVC_SLICE_TYPE_B           0
-#define HEVC_SLICE_TYPE_I            2
-
 
 #define VAAPI_ENCODER_HEVC_NAL_REF_IDC_NONE        0
 #define VAAPI_ENCODER_HEVC_NAL_REF_IDC_LOW         1
@@ -62,47 +61,48 @@ using std::vector;
 typedef enum
 {
     TRAIL_N = 0,
-    TRAIL_R,       // 1
-    TSA_N,         // 2
-    TSA_R,         // 3
-    STSA_N,        // 4
-    STSA_R,        // 5
-    RADL_N,        // 6
-    RADL_R,        // 7
-    RASL_N,        // 8
-    RASL_R,        // 9 
-    RSV_VCL_N10,   //10
-    RSV_VCL_N11,   //11
-    RSV_VCL_N12,   //12
-    RSV_VCL_N13,   //13
-    RSV_VCL_N14,   //14
-    RSV_VCL_N15,   //15
-    BLA_W_LP,      // 16
-    BLA_W_RADL,    // 17
-    BLA_N_LP,      // 18
-    IDR_W_RADL,    //19
-    IDR_N_LP,      //20
-    CRA_NUT,       //21
-    RSV_IRAP_VCL22, //22
-    RSV_IRAP_VCL23, //23
-    RSV_VCL24,     //24
-    RSV_VCL25,     //25
-    RSV_VCL26,     //26
-    RSV_VCL27,     //27
-    RSV_VCL28,     //28
-    RSV_VCL29,     //29
-    RSV_VCL30,     //30
-    RSV_VCL31,     //31
-    VPS_NUT,       //32
-    SPS_NUT,       //33
-    PPS_NUT,       //34
-    AUD_NUT,       //35
-    EOS_NUT,       //36
-    EOB_NUT,       //37
-    FD_NUT,        //38
-    PREFIX_SEI_NUT,//39
-    SUFFIX_SEI_NUT
-}NalUnitType;
+    TRAIL_R = 1,
+    TSA_N = 2,
+    TSA_R = 3 ,
+    STSA_N = 4,
+    STSA_R = 5,
+    RADL_N = 6,
+    RADL_R = 7,
+    RASL_N = 8,
+    RASL_R = 9,
+    RSV_VCL_N10 = 10,
+    RSV_VCL_N11 = 11,
+    RSV_VCL_N12 = 12,
+    RSV_VCL_N13 = 13,
+    RSV_VCL_N14 = 14,
+    RSV_VCL_N15 = 15,
+    BLA_W_LP = 16,
+    BLA_W_RADL = 17,
+    BLA_N_LP = 18,
+    IDR_W_RADL = 19,
+    IDR_N_LP = 20,
+    CRA_NUT = 21,
+    RSV_IRAP_VCL22 = 22,
+    RSV_IRAP_VCL23 = 23,
+    RSV_VCL24 = 24,
+    RSV_VCL25 = 25,
+    RSV_VCL26 = 26,
+    RSV_VCL27 = 27,
+    RSV_VCL28 = 28,
+    RSV_VCL29 = 29,
+    RSV_VCL30 = 30,
+    RSV_VCL31 = 31,
+    VPS_NUT = 32,
+    SPS_NUT = 33,
+    PPS_NUT = 34,
+    AUD_NUT = 35,
+    EOS_NUT = 36,
+    EOB_NUT = 37,
+    FD_NUT = 38,
+    PREFIX_SEI_NUT = 39,
+    SUFFIX_SEI_NUT = 40
+}HevcNalUnitType;
+
 
 /* Get slice_type value for H.264 specification */
 static uint8_t
@@ -126,7 +126,7 @@ static uint32_t log2 (uint32_t num)
     uint32_t ret = 0;
     assert(num);
 
-    while ((num >>= 1))
+    while (num > (1 << ret))
         ++ret;
 
     return ret;
@@ -196,23 +196,6 @@ bit_writer_put_se(BitWriter *bitwriter, int32_t value)
         return FALSE;
     return TRUE;
 }
-
-static BOOL
-bit_writer_put_uv(BitWriter *bitwriter, uint32_t value, uint32_t max_value)
-{
-
-    uint32_t  size_in_bits = 0;
-
-    while (max_value > (1 << size_in_bits)) {
-        ++size_in_bits;
-    }
-    printf("put_uv: value: %d\t, size_in_bits: %d\n", value, size_in_bits);
-    if (!bit_writer_put_bits_uint32(bitwriter, value, size_in_bits))
-        return FALSE;
-
-    return TRUE;
-}
-
 
 static BOOL
 bit_writer_write_nal_header(
@@ -293,7 +276,7 @@ static void profile_tier_level(
     }
 }
 
-void st_ref_pic_set(BitWriter *bs, int stRpsIdx, int refIdx, const ShortRFS shortRFS)
+void st_ref_pic_set(BitWriter *bs, int stRpsIdx, const ShortRFS shortRFS)
 {
     int i;
     if (stRpsIdx)
@@ -537,7 +520,7 @@ private:
 
         bit_writer_put_ue(bitwriter, m_encoder->m_shortRFS.num_short_term_ref_pic_sets);
         for (i = 0; i < m_encoder->m_shortRFS.num_short_term_ref_pic_sets; i++)
-            st_ref_pic_set(bitwriter, i, i, m_encoder->m_shortRFS);
+            st_ref_pic_set(bitwriter, i, m_encoder->m_shortRFS);
 
         /* long_term_ref_pics_present_flag */
         bit_writer_put_bits_uint32(bitwriter, 0, 1);
@@ -801,7 +784,7 @@ public:
 };
 
 VaapiEncoderHEVC::VaapiEncoderHEVC():
-    m_ctbSize(9),
+    m_ctbSize(8),
     m_cuSize(16),
     m_minTbSize(4),
     m_maxTbSize(16),
@@ -1020,38 +1003,28 @@ Encode_Status VaapiEncoderHEVC::reorder(const SurfacePtr& surface, uint64_t time
     if (!surface)
         return ENCODE_INVALID_PARAMS;
 
-    ++m_curPresentIndex;
     PicturePtr picture(new VaapiEncPictureHEVC(m_context, surface, timeStamp));
-    picture->m_poc = ((m_curPresentIndex) % m_maxPicOrderCnt);
 
     bool isIdr = (m_frameIndex == 0 ||m_frameIndex >= keyFramePeriod() || forceKeyFrame);
 
     /* check key frames */
     if (isIdr || (m_frameIndex % intraPeriod() == 0)) {
-        ++m_curFrameNum;
-        ++m_frameIndex;
-        /* b frame enabled,  check queue of reorder_frame_list */
-        if (m_numBFrames
-                && (m_reorderFrameList.size() > 0)) {
-            assert(0);
-
-        }
+        /* make sure all picutres are flushed before encoding I/IDR frame */
+        ASSERT(!m_reorderFrameList.size());
         setIntraFrame (picture, isIdr);
         m_reorderFrameList.push_back(picture);
         m_reorderState = VAAPI_ENC_REORD_DUMP_FRAMES;
-        return ENCODE_SUCCESS;
-    }
-    /* new p/b frames coming */
-    ++m_frameIndex;
-    if (m_reorderFrameList.size() < m_numBFrames) {
-        assert(0);
+    } else if (m_frameIndex % (m_numBFrames + 1) != 0) {
+        setBFrame (picture);
         m_reorderFrameList.push_back(picture);
-        return ENCODE_SUCCESS;
+    } else {
+        setPFrame (picture);
+        m_reorderFrameList.push_front(picture);
+        m_reorderState = VAAPI_ENC_REORD_DUMP_FRAMES;
     }
-    ++m_curFrameNum;
-    setPFrame (picture);
-    m_reorderFrameList.push_front(picture);
-    m_reorderState = VAAPI_ENC_REORD_DUMP_FRAMES;
+    
+    picture->m_poc = ((m_frameIndex) % m_maxPicOrderCnt);
+    m_frameIndex++;
     return ENCODE_SUCCESS;
 }
 
@@ -1065,15 +1038,18 @@ Encode_Status VaapiEncoderHEVC::doEncode(const SurfacePtr& surface, uint64_t tim
     ret = reorder(surface, timeStamp, forceKeyFrame);
     if (ret != ENCODE_SUCCESS)
         return ret;
-    if (m_reorderState == VAAPI_ENC_REORD_DUMP_FRAMES) {
+
+    while (m_reorderState == VAAPI_ENC_REORD_DUMP_FRAMES) {
         if (!m_maxCodedbufSize)
             ensureCodedBufferSize();
         ASSERT(m_maxCodedbufSize);
         CodedBufferPtr codedBuffer = VaapiCodedBuffer::create(m_context, m_maxCodedbufSize);
         if (!codedBuffer)
             return ENCODE_NO_MEMORY;
+        printf("m_reorderFrameList size: %d\n", m_reorderFrameList.size());
         PicturePtr picture = m_reorderFrameList.front();
         m_reorderFrameList.pop_front();
+        printf("m_reorderFrameList size: %d\n", m_reorderFrameList.size());
         picture->m_codedBuffer = codedBuffer;
 
         if (m_reorderFrameList.empty())
@@ -1111,29 +1087,27 @@ void VaapiEncoderHEVC::resetGopStart ()
 {
     m_idrNum = 0;
     m_frameIndex = 0;
-    m_curFrameNum = 0;
-    m_curPresentIndex = 0;
 }
 
 /* Marks the supplied picture as a B-frame */
 void VaapiEncoderHEVC::setBFrame (const PicturePtr& pic)
 {
     pic->m_type = VAAPI_PICTURE_TYPE_B;
-    pic->m_frameNum = (m_curFrameNum % m_maxFrameNum);
+    pic->m_frameNum = (m_frameIndex % m_maxFrameNum);
 }
 
 /* Marks the supplied picture as a P-frame */
 void VaapiEncoderHEVC::setPFrame (const PicturePtr& pic)
 {
     pic->m_type = VAAPI_PICTURE_TYPE_P;
-    pic->m_frameNum = (m_curFrameNum % m_maxFrameNum);
+    pic->m_frameNum = (m_frameIndex % m_maxFrameNum);
 }
 
 /* Marks the supplied picture as an I-frame */
 void VaapiEncoderHEVC::setIFrame (const PicturePtr& pic)
 {
     pic->m_type = VAAPI_PICTURE_TYPE_I;
-    pic->m_frameNum = (m_curFrameNum % m_maxFrameNum);
+    pic->m_frameNum = (m_frameIndex % m_maxFrameNum);
 }
 
 /* Marks the supplied picture as an IDR frame */
@@ -1150,8 +1124,6 @@ void VaapiEncoderHEVC::setIntraFrame (const PicturePtr& picture,bool idIdr)
     if (idIdr) {
         resetGopStart();
         setIdrFrame(picture);
-        //+1 for next frame
-        m_frameIndex++;
     } else
         setIFrame(picture);
 }
@@ -1165,7 +1137,7 @@ referenceListUpdate (const PicturePtr& picture, const SurfacePtr& surface)
     if (picture->isIdr()) {
         referenceListFree();
     } else if (m_refList.size() >= m_maxRefFrames) {
-        m_refList.pop_front();
+        m_refList.pop_back();
     }
     ReferencePtr ref(new VaapiEncoderHEVCRef(picture, surface));
     m_refList.push_front(ref); // recent first
@@ -1173,10 +1145,8 @@ referenceListUpdate (const PicturePtr& picture, const SurfacePtr& surface)
     return true;
 }
 
-bool  VaapiEncoderHEVC::referenceListInit (
-    const PicturePtr& picture,
-    vector<ReferencePtr>& refList0,
-    vector<ReferencePtr>& refList1) const
+bool  VaapiEncoderHEVC::sliceReferenceListUpdate (
+    const PicturePtr& picture) const
 {
     assert(picture->m_type == VAAPI_PICTURE_TYPE_P);
     refList0.reserve(m_refList.size());
@@ -1208,21 +1178,24 @@ void VaapiEncoderHEVC::setShortRFS()
             m_shortRFS.num_positive_pics      = 1;
     }
 
-    m_shortRFS.num_short_term_ref_pic_sets = 1;
+    m_shortRFS.num_short_term_ref_pic_sets = 0;
 
     m_shortRFS.inter_ref_pic_set_prediction_flag = 0;
 
-    for (i = 0; i < m_shortRFS.num_short_term_ref_pic_sets; i++)
+    m_shortRFS.delta_poc_s0_minus1[0]                 = 0;
+    m_shortRFS.used_by_curr_pic_s0_flag[0]            = 1;
+
+    for (i = 1; i < m_shortRFS.num_negative_pics; i++)
     {
         m_shortRFS.delta_poc_s0_minus1[i]                 = 0;
         m_shortRFS.used_by_curr_pic_s0_flag[i]            = 1;
-
-        /*FIXME*/
-        if (m_numBFrames) {
-            m_shortRFS.delta_poc_s1_minus1[i]                 = 0;
-            m_shortRFS.used_by_curr_pic_s1_flag[i]            = 1;
-        }
     }
+
+    for (i = 1; i < m_shortRFS.num_positive_pics; i++) {
+        m_shortRFS.delta_poc_s1_minus1[i]                 = 0;
+        m_shortRFS.used_by_curr_pic_s1_flag[i]            = 1;
+    }
+ 
 }
 
 bool VaapiEncoderHEVC::fill(VAEncSequenceParameterBufferHEVC* seqParam) const
@@ -1425,7 +1398,7 @@ bool VaapiEncoderHEVC::addPackedSliceHeader(const PicturePtr& picture,
         ASSERT (!m_picParam->pic_fields.bits.dependent_slice_segments_enabled_flag &&
                       !sliceParam->slice_fields.bits.dependent_slice_segment_flag);
 
-        bit_writer_put_uv(&bs, sliceParam->slice_segment_address, sliceParam->num_ctu_in_slice);
+        bit_writer_put_bits_uint32(&bs, sliceParam->slice_segment_address, log2(sliceParam->num_ctu_in_slice));
     }
 
     if (!sliceParam->slice_fields.bits.dependent_slice_segment_flag) {
@@ -1435,12 +1408,11 @@ bool VaapiEncoderHEVC::addPackedSliceHeader(const PicturePtr& picture,
 
         if (nalUnitType != IDR_W_RADL && nalUnitType != IDR_N_LP) {
             bit_writer_put_bits_uint32(&bs, m_picParam->decoded_curr_pic.pic_order_cnt , m_log2MaxPicOrderCnt);
-            printf("slice_poc is %d, log2_max_poc is: %d\n", m_picParam->decoded_curr_pic.pic_order_cnt, m_log2MaxPicOrderCnt );
             bit_writer_put_bits_uint32(&bs, short_term_ref_pic_set_sps_flag, 1);
             if (!short_term_ref_pic_set_sps_flag)
-                st_ref_pic_set(&bs, m_shortRFS.num_short_term_ref_pic_sets, 0, m_shortRFS);
+                st_ref_pic_set(&bs, m_shortRFS.num_short_term_ref_pic_sets, m_shortRFS);
             else if (m_shortRFS.num_short_term_ref_pic_sets > 1)
-                bit_writer_put_uv(&bs, m_shortRFS.short_term_ref_pic_set_idx, m_shortRFS.num_short_term_ref_pic_sets);
+                bit_writer_put_bits_uint32(&bs, m_shortRFS.short_term_ref_pic_set_idx, log2(m_shortRFS.num_short_term_ref_pic_sets));
             /* long_term_ref_pics_present_flag is set to 0 */
 
             if (sliceParam->slice_type != HEVC_SLICE_TYPE_I) {
@@ -1595,11 +1567,8 @@ bool VaapiEncoderHEVC::ensureSlices(const PicturePtr& picture)
 {
     assert (picture);
 
-    vector<ReferencePtr> refList0;
-    vector<ReferencePtr> refList1;
-
     if (picture->m_type != VAAPI_PICTURE_TYPE_I &&
-            !referenceListInit(picture, refList0, refList1)) {
+            !sliceReferenceListUpdate(picture)) {
         ERROR ("reference list reorder failed");
         return false;
     }

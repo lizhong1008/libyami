@@ -102,10 +102,8 @@ private:
     //reference list related
     Encode_Status reorder(const SurfacePtr& surface, uint64_t timeStamp, bool forceKeyFrame);
     bool referenceListUpdate (const PicturePtr&, const SurfacePtr&);
-    bool referenceListInit (
-        const PicturePtr& ,
-        std::vector<ReferencePtr>& reflist0,
-        std::vector<ReferencePtr>& reflist1) const;
+    bool sliceReferenceListUpdate (
+        const PicturePtr&) const;
 
     void referenceListFree();
     //template end
@@ -144,10 +142,13 @@ private:
     std::list<PicturePtr> m_reorderFrameList;
     VaapiEncReorderState m_reorderState;
     uint32_t m_frameIndex;
-    uint32_t m_curFrameNum;
-    uint32_t m_curPresentIndex;
+    
     /* reference list */
     std::list<ReferencePtr> m_refList;
+    std::list<ReferencePtr> m_refList0;
+    std::list<ReferencePtr> m_refList1;
+
+    
     uint32_t m_maxRefFrames;
     /* max reflist count */
     uint32_t m_maxRefList0Count;
