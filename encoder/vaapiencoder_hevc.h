@@ -31,6 +31,7 @@
 #include "common/lock.h"
 #include <list>
 #include <queue>
+#include <deque>
 #include <pthread.h>
 #include <va/va_enc_hevc.h>
 
@@ -84,14 +85,11 @@ private:
     Encode_Status encodePicture(const PicturePtr&);
     bool fill(VAEncSequenceParameterBufferHEVC*) const;
     bool fill(VAEncPictureParameterBufferHEVC*, const PicturePtr&, const SurfacePtr&) const ;
+    bool fillReferenceList(VAEncSliceParameterBufferHEVC* slice) const;
     bool ensureSequenceHeader(const PicturePtr&, const VAEncSequenceParameterBufferHEVC* const);
     bool ensurePictureHeader(const PicturePtr&, const VAEncPictureParameterBufferHEVC* const );
-    bool addSliceHeaders (const PicturePtr&,
-                          const std::vector<ReferencePtr>& refList0,
-                          const std::vector<ReferencePtr>& refList1) const;
+    bool addSliceHeaders (const PicturePtr&) const;
     bool addPackedSliceHeader (const PicturePtr&,
-                          const std::vector<ReferencePtr>& refList0,
-                          const std::vector<ReferencePtr>& refList1,
                           const VAEncSliceParameterBufferHEVC* const sliceParam,
                           uint32_t sliceIndex) const;
     bool ensureSequence(const PicturePtr&);
@@ -102,8 +100,7 @@ private:
     //reference list related
     Encode_Status reorder(const SurfacePtr& surface, uint64_t timeStamp, bool forceKeyFrame);
     bool referenceListUpdate (const PicturePtr&, const SurfacePtr&);
-    bool sliceReferenceListUpdate (
-        const PicturePtr&) const;
+    bool sliceReferenceListUpdate (const PicturePtr&);
 
     void referenceListFree();
     //template end
@@ -144,9 +141,9 @@ private:
     uint32_t m_frameIndex;
     
     /* reference list */
-    std::list<ReferencePtr> m_refList;
-    std::list<ReferencePtr> m_refList0;
-    std::list<ReferencePtr> m_refList1;
+    std::deque<ReferencePtr> m_refList;
+    std::deque<ReferencePtr> m_refList0;
+    std::deque<ReferencePtr> m_refList1;
 
     
     uint32_t m_maxRefFrames;

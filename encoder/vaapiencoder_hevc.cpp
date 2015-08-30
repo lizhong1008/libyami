@@ -43,6 +43,7 @@ typedef VaapiEncoderHEVC::StreamHeaderPtr StreamHeaderPtr;
 
 using std::list;
 using std::vector;
+using std::deque;
 
 /* Define the maximum IDR period */
 #define MAX_IDR_PERIOD 512
@@ -796,7 +797,7 @@ VaapiEncoderHEVC::VaapiEncoderHEVC():
     m_videoParamCommon.rcParams.initQP = 26;
     m_videoParamCommon.rcParams.minQP = 1;
 
-    m_videoParamAVC.idrInterval = 1;
+    m_videoParamAVC.idrInterval = 30;
 }
 
 VaapiEncoderHEVC::~VaapiEncoderHEVC()
@@ -1009,8 +1010,6 @@ Encode_Status VaapiEncoderHEVC::reorder(const SurfacePtr& surface, uint64_t time
 
     /* check key frames */
     if (isIdr || (m_frameIndex % intraPeriod() == 0)) {
-        /* make sure all picutres are flushed before encoding I/IDR frame */
-        ASSERT(!m_reorderFrameList.size());
         setIntraFrame (picture, isIdr);
         m_reorderFrameList.push_back(picture);
         m_reorderState = VAAPI_ENC_REORD_DUMP_FRAMES;
@@ -1146,17 +1145,16 @@ referenceListUpdate (const PicturePtr& picture, const SurfacePtr& surface)
 }
 
 bool  VaapiEncoderHEVC::sliceReferenceListUpdate (
-    const PicturePtr& picture) const
+    const PicturePtr& picture)
 {
     assert(picture->m_type == VAAPI_PICTURE_TYPE_P);
-    refList0.reserve(m_refList.size());
-    refList0.insert(refList0.end(), m_refList.begin(), m_refList.end());
+    m_refList0 = m_refList;
 
-    assert (refList0.size() + refList1.size() <= m_maxRefFrames);
-    if (refList0.size() > m_maxRefList0Count)
-        refList0.resize(m_maxRefList0Count);
-    if (refList1.size() > m_maxRefList1Count)
-        refList1.resize(m_maxRefList1Count);
+    assert (m_refList0.size() + m_refList1.size() <= m_maxRefFrames);
+    if (m_refList0.size() > m_maxRefList0Count)
+        m_refList0.pop_back();
+    if (m_refList1.size() > m_maxRefList1Count)
+        m_refList1.pop_back();
 
     return true;
 }
@@ -1164,6 +1162,8 @@ bool  VaapiEncoderHEVC::sliceReferenceListUpdate (
 void VaapiEncoderHEVC::referenceListFree()
 {
     m_refList.clear();
+    m_refList0.clear();
+    m_refList1.clear();
 }
 
 void VaapiEncoderHEVC::setShortRFS()
@@ -1266,12 +1266,9 @@ bool VaapiEncoderHEVC::fill(VAEncPictureParameterBufferHEVC* picParam, const Pic
     picParam->decoded_curr_pic.pic_order_cnt = picture->m_poc;
 
     if (picture->m_type != VAAPI_PICTURE_TYPE_I) {
-        list<ReferencePtr>::const_iterator it;
-        for (it = m_refList.begin(); it != m_refList.end(); ++it) {
-            assert(*it && (*it)->m_pic && ((*it)->m_pic->getID() != VA_INVALID_ID));
-            picParam->reference_frames[i].picture_id = (*it)->m_pic->getID();
-            printf("Rerference_Index: %d\t, Referenc_ID: %x\n", i, picParam->reference_frames[i].picture_id);
-            ++i;
+        for (i = 0; i < m_refList.size(); i++) {
+            assert(m_refList[i] && m_refList[i]->m_pic && (m_refList[i]->m_pic->getID() != VA_INVALID_ID));
+            picParam->reference_frames[i].picture_id = m_refList[i]->m_pic->getID();
         }
     }
     for (; i < 16; ++i) {
@@ -1350,34 +1347,28 @@ bool VaapiEncoderHEVC::ensurePictureHeader(const PicturePtr& picture, const VAEn
     return true;
 }
 
-static void fillReferenceList(VAEncSliceParameterBufferHEVC* slice, const vector<ReferencePtr>& refList, uint32_t index)
+bool VaapiEncoderHEVC:: fillReferenceList(VAEncSliceParameterBufferHEVC* slice) const
 {
-    VAPictureHEVC* picList;
-    uint32_t total;
     uint32_t i = 0;
-    if (!index) {
-        picList = slice->ref_pic_list0;
-        total = N_ELEMENTS(slice->ref_pic_list0);
-    }
-    else {
-        picList = slice->ref_pic_list1;
-        total = N_ELEMENTS(slice->ref_pic_list1);
-    }
-    for (; i < refList.size(); i++)
-        picList[i].picture_id = refList[i]->m_pic->getID();
-    for (; i <total; i++)
-        picList[i].picture_id = VA_INVALID_SURFACE;
+    for (i = 0; i < m_refList0.size(); i++)
+        slice->ref_pic_list0[i].picture_id = m_refList0[i]->m_pic->getID();
+    for (; i < N_ELEMENTS(slice->ref_pic_list0); i++)
+        slice->ref_pic_list0[i].picture_id = VA_INVALID_SURFACE;
+
+    for (i = 0; i < m_refList1.size(); i++)
+        slice->ref_pic_list1[i].picture_id = m_refList1[i]->m_pic->getID();
+    for (; i < N_ELEMENTS(slice->ref_pic_list1); i++)
+        slice->ref_pic_list1[i].picture_id = VA_INVALID_SURFACE;
+    return true;
 }
 
 bool VaapiEncoderHEVC::addPackedSliceHeader(const PicturePtr& picture,
-                                        const vector<ReferencePtr>& refList0,
-                                        const vector<ReferencePtr>& refList1,
                                         const VAEncSliceParameterBufferHEVC* const sliceParam,
                                         uint32_t sliceIndex) const
 {
     BitWriter bs;
     BOOL short_term_ref_pic_set_sps_flag = !!m_shortRFS.num_short_term_ref_pic_sets;
-    NalUnitType nalUnitType = (picture->isIdr() ? IDR_W_RADL : TRAIL_R );
+    HevcNalUnitType nalUnitType = (picture->isIdr() ? IDR_W_RADL : TRAIL_R );
     bit_writer_init (&bs, 128 * 8);
     bit_writer_put_bits_uint32(&bs, HEVC_NAL_START_CODE, 32);
     bit_writer_write_nal_header(&bs, nalUnitType);
@@ -1454,9 +1445,7 @@ bool VaapiEncoderHEVC::addPackedSliceHeader(const PicturePtr& picture,
 }
 
 /* Adds slice headers to picture */
-bool VaapiEncoderHEVC::addSliceHeaders (const PicturePtr& picture,
-                                        const vector<ReferencePtr>& refList0,
-                                        const vector<ReferencePtr>& refList1) const
+bool VaapiEncoderHEVC::addSliceHeaders (const PicturePtr& picture) const
 {
     VAEncSliceParameterBufferHEVC *sliceParam;
     uint32_t sliceOfCtus, sliceModCtus, curSliceCtus;
@@ -1466,12 +1455,12 @@ bool VaapiEncoderHEVC::addSliceHeaders (const PicturePtr& picture,
     assert (picture);
     /*one reference frame supported */
     if (picture->m_type == VAAPI_PICTURE_TYPE_I) {
-        assert(!refList0.size() && !refList1.size());
+        assert(!m_refList0.size() && !m_refList1.size());
     }
     else {
-        assert(refList0.size() == 1);
+        assert(m_refList0.size() == 1);
         if (picture->m_type == VAAPI_PICTURE_TYPE_B)
-            assert(refList1.size() == 1);
+            assert(m_refList1.size() == 1);
     }
 
     numCtus= m_ctbWidth* m_ctbHeight;
@@ -1494,13 +1483,12 @@ bool VaapiEncoderHEVC::addSliceHeaders (const PicturePtr& picture,
         sliceParam->slice_type = hevc_get_slice_type (picture->m_type);
         assert (sliceParam->slice_type != -1);
         sliceParam->slice_pic_parameter_set_id = 0;
-        if (picture->m_type != VAAPI_PICTURE_TYPE_I && refList0.size() > 0)
-            sliceParam->num_ref_idx_l0_active_minus1 = refList0.size() - 1;
-        if (picture->m_type == VAAPI_PICTURE_TYPE_B && refList1.size() > 0)
-            sliceParam->num_ref_idx_l1_active_minus1 = refList1.size() - 1;
+        if (picture->m_type != VAAPI_PICTURE_TYPE_I && m_refList0.size() > 0)
+            sliceParam->num_ref_idx_l0_active_minus1 = m_refList0.size() - 1;
+        if (picture->m_type == VAAPI_PICTURE_TYPE_B && m_refList1.size() > 0)
+            sliceParam->num_ref_idx_l1_active_minus1 = m_refList1.size() - 1;
 
-        fillReferenceList(sliceParam, refList0, 0);
-        fillReferenceList(sliceParam, refList1, 1);
+        fillReferenceList(sliceParam);
 
         /* luma_log2_weight_denom should be the range: [0, 7] */
         sliceParam->luma_log2_weight_denom = 0;
@@ -1521,7 +1509,7 @@ bool VaapiEncoderHEVC::addSliceHeaders (const PicturePtr& picture,
 
         sliceParam->slice_fields.bits.last_slice_of_pic_flag = (lastCtuIndex == numCtus);
 
-        addPackedSliceHeader(picture, refList0, refList1, sliceParam, i);
+        addPackedSliceHeader(picture, sliceParam, i);
     }
     assert (lastCtuIndex == numCtus);
     
@@ -1572,7 +1560,7 @@ bool VaapiEncoderHEVC::ensureSlices(const PicturePtr& picture)
         ERROR ("reference list reorder failed");
         return false;
     }
-    if (!addSliceHeaders (picture, refList0, refList1))
+    if (!addSliceHeaders (picture))
         return false;
     return true;
 }
