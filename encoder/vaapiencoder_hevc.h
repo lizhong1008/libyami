@@ -129,10 +129,10 @@ private:
     uint32_t m_minTbSize;
     uint32_t m_maxTbSize;
 
-    uint32_t m_cuAlignedWidth;
-    uint32_t m_cuAlignedHeight;
-    uint32_t m_ctbWidth;
-    uint32_t m_ctbHeight;
+    uint32_t m_ctbAlignedWidth;
+    uint32_t m_ctbAlignedHeight;
+    uint32_t m_cuWidth;
+    uint32_t m_cuHeight;
 
     AVCStreamFormat m_streamFormat;
 

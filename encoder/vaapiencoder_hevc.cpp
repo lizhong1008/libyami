@@ -111,13 +111,13 @@ hevc_get_slice_type (VaapiPictureType type)
 {
     switch (type) {
     case VAAPI_PICTURE_TYPE_I:
-        printf("HEVC_SLICE_TYPE_I \n");
+        DEBUG("HEVC_SLICE_TYPE_I \n");
         return HEVC_SLICE_TYPE_I;
     case VAAPI_PICTURE_TYPE_P:
-        printf("HEVC_SLICE_TYPE_P \n");
+        DEBUG("HEVC_SLICE_TYPE_P \n");
         return HEVC_SLICE_TYPE_P;
     case VAAPI_PICTURE_TYPE_B:
-        printf("HEVC_SLICE_TYPE_B \n");
+        DEBUG("HEVC_SLICE_TYPE_B \n");
         return HEVC_SLICE_TYPE_B;
     default:
         return -1;
@@ -789,7 +789,7 @@ public:
 
 VaapiEncoderHEVC::VaapiEncoderHEVC():
     m_ctbSize(8),
-    m_cuSize(16),
+    m_cuSize(32),
     m_minTbSize(4),
     m_maxTbSize(16),
     m_streamFormat(AVC_STREAM_FORMAT_ANNEXB),
@@ -817,7 +817,7 @@ bool VaapiEncoderHEVC::ensureCodedBufferSize()
     if (m_maxCodedbufSize)
         return true;
 
-    m_maxCodedbufSize = m_cuAlignedWidth * m_cuAlignedHeight * 3 / 2;
+    m_maxCodedbufSize = m_ctbAlignedWidth * m_ctbAlignedHeight * 3 / 2 + 0x1000;
 
     DEBUG("m_maxCodedbufSize: %u", m_maxCodedbufSize);
 
@@ -836,18 +836,18 @@ void VaapiEncoderHEVC::resetParams ()
 
     assert (width() && height());
 
-    m_cuAlignedWidth = (width() + m_cuSize -1) / m_cuSize * m_cuSize;
-    m_cuAlignedHeight = (height() + m_cuSize -1) / m_cuSize * m_cuSize;
+    m_ctbAlignedWidth = (width() + m_ctbSize -1) / m_ctbSize * m_ctbSize;
+    m_ctbAlignedHeight = (height() + m_ctbSize -1) / m_ctbSize * m_ctbSize;
 
-    m_ctbWidth = (width() + m_cuSize -1) / m_cuSize;
-    m_ctbHeight = (height() + m_cuSize-1) / m_cuSize;
+    m_cuWidth = (width() + m_cuSize -1) / m_cuSize;
+    m_cuHeight = (height() + m_cuSize-1) / m_cuSize;
 
     m_confWinLeftOffset = m_confWinTopOffset = 0;
 
-    if (m_cuAlignedWidth != width() || m_cuAlignedHeight !=height()) {
+    if (m_ctbAlignedWidth != width() || m_ctbAlignedHeight !=height()) {
             m_confWinFlag = true;
-            m_confWinRightOffset = (m_cuAlignedWidth - width()) / 2;
-            m_confWinBottomOffset = (m_cuAlignedHeight -height()) / 2;
+            m_confWinRightOffset = (m_ctbAlignedWidth - width()) / 2;
+            m_confWinBottomOffset = (m_ctbAlignedHeight -height()) / 2;
     } else {
         m_confWinFlag = false;
         m_confWinRightOffset = 0;
@@ -1024,7 +1024,7 @@ Encode_Status VaapiEncoderHEVC::reorder(const SurfacePtr& surface, uint64_t time
         m_reorderState = VAAPI_ENC_REORD_DUMP_FRAMES;
     }
 
-    printf("m_frameIndex is %d\n", m_frameIndex);
+    DEBUG("m_frameIndex is %d\n", m_frameIndex);
     picture->m_poc = ((m_frameIndex) % m_maxPicOrderCnt);
     m_frameIndex++;
     return ENCODE_SUCCESS;
@@ -1048,7 +1048,7 @@ Encode_Status VaapiEncoderHEVC::doEncode(const SurfacePtr& surface, uint64_t tim
         CodedBufferPtr codedBuffer = VaapiCodedBuffer::create(m_context, m_maxCodedbufSize);
         if (!codedBuffer)
             return ENCODE_NO_MEMORY;
-        printf("m_reorderFrameList size: %d\n", m_reorderFrameList.size());
+        DEBUG("m_reorderFrameList size: %d\n", m_reorderFrameList.size());
         PicturePtr picture = m_reorderFrameList.front();
         m_reorderFrameList.pop_front();
         picture->m_codedBuffer = codedBuffer;
@@ -1202,7 +1202,7 @@ void VaapiEncoderHEVC::ShortRfsUpdate(const PicturePtr& picture)
             m_shortRFS.num_positive_pics      = 1;
             m_shortRFS.delta_poc_s1_minus1[0]  = m_refList1[0]->m_poc - picture->m_poc - 1;
             m_shortRFS.used_by_curr_pic_s1_flag[0]            = 1;
-            printf("m_refList1_size is %d\n", m_refList1.size());
+            DEBUG("m_refList1_size is %d\n", m_refList1.size());
         }
     }
 
@@ -1263,8 +1263,8 @@ bool VaapiEncoderHEVC::fill(VAEncSequenceParameterBufferHEVC* seqParam) const
     seqParam->ip_period = 1 + m_numBFrames;
     seqParam->bits_per_second = bitRate();
 
-    seqParam->pic_width_in_luma_samples = m_cuAlignedWidth;
-    seqParam->pic_height_in_luma_samples = m_cuAlignedHeight;
+    seqParam->pic_width_in_luma_samples = m_ctbAlignedWidth;
+    seqParam->pic_height_in_luma_samples = m_ctbAlignedHeight;
 
     /*Only support yuv 4:2:0 format */
     seqParam->seq_fields.bits.chroma_format_idc = 1;
@@ -1521,7 +1521,7 @@ bool VaapiEncoderHEVC::addSliceHeaders (const PicturePtr& picture) const
         assert(m_refList0.size() > 0);
     }
 
-    numCtus= m_ctbWidth* m_ctbHeight;
+    numCtus= m_cuWidth* m_cuHeight;
 
     assert (m_numSlices && m_numSlices < numCtus);
     sliceOfCtus = numCtus / m_numSlices;
