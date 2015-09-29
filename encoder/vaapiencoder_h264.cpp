@@ -698,7 +698,7 @@ VaapiEncoderH264::VaapiEncoderH264():
     m_streamFormat(AVC_STREAM_FORMAT_ANNEXB)
 {
     m_videoParamCommon.profile = VAProfileH264Main;
-    m_videoParamCommon.level = 51;
+    m_videoParamCommon.level = 40;
     m_videoParamCommon.rcParams.initQP = 26;
     m_videoParamCommon.rcParams.minQP = 1;
 
@@ -753,7 +753,7 @@ void VaapiEncoderH264::resetParams ()
 
     if (ipPeriod() == 0)
         m_videoParamCommon.intraPeriod = 1;
-    else if (ipPeriod() >= 1)
+    else
         m_numBFrames = ipPeriod() - 1;
 
     assert(intraPeriod() > ipPeriod());
@@ -1050,7 +1050,7 @@ referenceListUpdate (const PicturePtr& picture, const SurfacePtr& surface)
         m_refList.pop_back();
     }
     ReferencePtr ref(new VaapiEncoderH264Ref(picture, surface));
-    m_refList.push_front(ref); // recent first
+    m_refList.push_front(ref); // descending order for short-term reference list
     assert (m_refList.size() <= m_maxRefFrames);
     return true;
 }
@@ -1067,12 +1067,11 @@ bool  VaapiEncoderH264::pictureReferenceListSet (
     for (i = 0; i < m_refList.size(); i++) {
         assert(picture->m_poc != m_refList[i]->m_poc);
         if (picture->m_poc > m_refList[i]->m_poc) {
-            /* set forward reflist */
-            m_refList0.push_front(m_refList[i]);
-            if (m_refList0.size() > m_maxRefList0Count)
-                m_refList0.pop_back();
+            /* set forward reflist: descending order */
+            if (m_refList0.size() < m_maxRefList0Count)
+                m_refList0.push_back(m_refList[i]);
         } else {
-            /* set backward reflist */
+            /* set backward reflist: ascending order */
             m_refList1.push_front(m_refList[i]);
             if (m_refList1.size() > m_maxRefList1Count)
                 m_refList1.pop_back();
@@ -1164,13 +1163,13 @@ bool VaapiEncoderH264::fill(VAEncPictureParameterBufferH264* picParam, const Pic
     picParam->CurrPic.picture_id = surface->getID();
     picParam->CurrPic.TopFieldOrderCnt = picture->m_poc;
 
-    printf("m_refList.size is %u\n",m_refList.size());
     if (picture->m_type != VAAPI_PICTURE_TYPE_I) {
         for (i = 0; i < m_refList.size(); i++) {
             picParam->ReferenceFrames[i].picture_id = m_refList[i]->m_pic->getID();
             picParam->ReferenceFrames[i].TopFieldOrderCnt = m_refList[i]->m_poc;
         }
     }
+    
     for (; i < 16; ++i) {
         picParam->ReferenceFrames[i].picture_id = VA_INVALID_ID;
     }
@@ -1278,9 +1277,6 @@ bool VaapiEncoderH264::addSliceHeaders (const PicturePtr& picture) const
             sliceParam->num_ref_idx_l0_active_minus1 = m_refList0.size() - 1;
         if (picture->m_type == VAAPI_PICTURE_TYPE_B && m_refList1.size() > 0)
             sliceParam->num_ref_idx_l1_active_minus1 = m_refList1.size() - 1;
-
-        printf("m_refList0.size is %u\n",m_refList0.size());
-        printf("m_refList1.size is %u\n",m_refList1.size());
 
         fillReferenceList(sliceParam);
 
