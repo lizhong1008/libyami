@@ -72,6 +72,7 @@ private:
     bool ensurePicture (const PicturePtr&, const SurfacePtr&);
     bool ensureSlices(const PicturePtr&);
     bool ensureCodedBufferSize();
+    bool addPackedPrefixNalUnit(const PicturePtr&) const;
 
     //reference list related
     YamiStatus reorder(const SurfacePtr& surface, uint64_t timeStamp, bool forceKeyFrame);
@@ -90,6 +91,7 @@ private:
 
     void resetParams();
     void checkProfileLimitation();
+    void checkSvcTempLimitaion();
 
     VideoParamsAVC m_videoParamAVC;
 
@@ -98,6 +100,8 @@ private:
     uint32_t m_numBFrames;
     uint32_t m_mbWidth;
     uint32_t m_mbHeight;
+    bool m_isSvcT;
+    uint32_t m_temporalLayerNum;
 
     /* re-ordering */
     std::list<PicturePtr> m_reorderFrameList;
