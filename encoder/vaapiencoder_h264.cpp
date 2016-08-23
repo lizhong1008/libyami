@@ -55,6 +55,10 @@ using std::vector;
 #define VAAPI_ENCODER_H264_NAL_REF_IDC_MEDIUM      2
 #define VAAPI_ENCODER_H264_NAL_REF_IDC_HIGH        3
 
+#define H264_SLICE_TYPE_P            0
+#define H264_SLICE_TYPE_B            1
+#define H264_SLICE_TYPE_I            2
+
 typedef enum {
   VAAPI_ENCODER_H264_NAL_UNKNOWN     = 0,
   VAAPI_ENCODER_H264_NAL_NON_IDR     = 1,
@@ -64,7 +68,7 @@ typedef enum {
   VAAPI_ENCODER_H264_NAL_PPS         = 8,
   VAAPI_ENCODER_H264_NAL_PREFIX   = 14,
   VAAPI_ENCODER_H264_NAL_SUBSET_SPS = 15
-} GstVaapiEncoderH264NalType;
+} VaapiEncoderH264NalType;
 
 /* Refer to H.264 spec Table A-1 l Level limits */
 struct H264LevelLimits {
@@ -311,6 +315,8 @@ ASSERT(scalabilityInfoBytes && scalabilityInfoData);
 bit_writer_write_nal_header (bitwriter,
      VAAPI_ENCODER_H264_NAL_REF_IDC_NONE, VAAPI_ENCODER_H264_NAL_SEI);
 
+ERROR("scalabilityInfoBytes is %d", scalabilityInfoBytes);
+
 bitwriter->writeBits(SCALABILITY_INFO_PAYLOAD_TYPE, 8);
 bitwriter->writeBits(scalabilityInfoBytes, 8);
 
@@ -320,6 +326,7 @@ for (i = 0; i < scalabilityInfoBytes; i++){
 /* rbsp_trailing_bits */
 bit_writer_write_trailing_bits(bitwriter);
 
+return TRUE;
 }
 
 
@@ -536,7 +543,7 @@ bit_writer_write_pps(
 
     bit_writer_write_nal_header (bitwriter,
                          VAAPI_ENCODER_H264_NAL_REF_IDC_HIGH, VAAPI_ENCODER_H264_NAL_PPS);
-    /* pic_parameter_set_id */
+    /* m_picParameter_set_id */
     bit_writer_put_ue(bitwriter, pic->pic_parameter_set_id);
     /* seq_parameter_set_id */
     bit_writer_put_ue(bitwriter, pic->seq_parameter_set_id);
@@ -825,13 +832,15 @@ public:
         m_frameNum(picture->m_frameNum),
         m_poc(picture->m_poc),
         m_pic(surface),
-        m_temporalId(picture->m_temporalId)
+        m_temporalId(picture->m_temporalId),
+        m_diffPicNumMinus1(0)
     {
     }
     uint32_t m_frameNum;
     uint32_t m_poc;
     SurfacePtr m_pic;
     uint32_t m_temporalId;
+    uint8_t m_diffPicNumMinus1;//abs_diff_pic_num_minus1
 };
 
 VaapiEncoderH264::VaapiEncoderH264():
@@ -962,7 +971,8 @@ void VaapiEncoderH264::resetParams ()
     DEBUG("resetParams, ensureCodedBufferSize");
     ensureCodedBufferSize();
 
-    m_temporalLayerNum = m_videoParamAVC.temporalLayerNum;
+    //m_temporalLayerNum = m_videoParamAVC.temporalLayerNum;
+    m_temporalLayerNum = 4;
 
     checkProfileLimitation();
     checkSvcTempLimitaion();
@@ -1008,7 +1018,7 @@ void VaapiEncoderH264::resetParams ()
         m_maxRefList0Count = m_maxOutputBuffer -1;
 
     m_maxRefFrames =
-        m_maxRefList0Count + m_maxRefList1Count;
+        16;
 
     assert(m_maxRefFrames <= m_maxOutputBuffer);
     INFO("m_maxRefFrames: %d", m_maxRefFrames);
@@ -1169,6 +1179,7 @@ YamiStatus VaapiEncoderH264::reorder(const SurfacePtr& surface, uint64_t timeSta
     picture->m_poc = m_frameIndex * 2;
     picture->m_priorityId = m_videoParamAVC.priorityId;
     picture->m_temporalId = TempIds[m_temporalLayerNum - 1][m_frameIndex % H264_MIN_TEMPORAL_GOP];
+    ERROR("m_temporalId is %d", picture->m_temporalId);
     m_frameIndex++;
     return YAMI_SUCCESS;
 }
@@ -1298,11 +1309,15 @@ bool  VaapiEncoderH264::pictureReferenceListSet (
     for (i = 0; i < m_refList.size(); i++) {
         assert(picture->m_poc != m_refList[i]->m_poc);
         if (picture->m_poc > m_refList[i]->m_poc &&
-            picture->m_temporalId >= m_refList[i]->m_temporalId)
+            picture->m_temporalId >= m_refList[i]->m_temporalId){
+            m_refList[i]->m_diffPicNumMinus1 = picture->m_frameNum - m_refList[i]->m_frameNum -1;
             m_refList0.push_back(m_refList[i]);/* set forward reflist: descending order */
+            }
         else if (picture->m_poc < m_refList[i]->m_poc &&
-            picture->m_temporalId >= m_refList[i]->m_temporalId)
+            picture->m_temporalId >= m_refList[i]->m_temporalId){
+            m_refList[i]->m_diffPicNumMinus1 = picture->m_frameNum - m_refList[i]->m_frameNum -1;
             m_refList1.push_front(m_refList[i]);/* set backward reflist: ascending order */
+            }
     }
 
     if (m_refList0.size() > m_maxRefList0Count)
@@ -1312,6 +1327,8 @@ bool  VaapiEncoderH264::pictureReferenceListSet (
 
     if (picture->m_type == VAAPI_PICTURE_P)
         assert(m_refList1.empty());
+
+    ERROR("pictureReferenceListSet, m_refList0_size is %d", (int32_t)m_refList0.size());
 
     assert (m_refList0.size() + m_refList1.size() <= m_maxRefFrames);
 
@@ -1436,6 +1453,7 @@ bool VaapiEncoderH264::fill(VAEncPictureParameterBufferH264* picParam, const Pic
 bool VaapiEncoderH264::ensureSequenceHeader(const PicturePtr& picture,const VAEncSequenceParameterBufferH264* const sequence)
 {
     m_headers.reset(new VaapiEncStreamHeaderH264());
+    m_headers->setSEI(sequence, m_temporalLayerNum);
     m_headers->setSPS(sequence, profile());
     return true;
 }
@@ -1510,6 +1528,188 @@ bool VaapiEncoderH264::addPackedPrefixNalUnit(const PicturePtr& picture) const
     return ret;
 }
 
+bool VaapiEncoderH264::addPackedSliceHeader(const PicturePtr& picture,
+                                        const VAEncSliceParameterBufferH264* const sliceParam,
+                                        uint32_t sliceIndex) const
+{
+    bool ret = true;
+    uint32_t i = 0;
+    BitWriter bs;
+    bs.writeBits(H264_NAL_START_CODE, 32);
+
+    if (sliceParam->slice_type == H264_SLICE_TYPE_I){
+        bit_writer_write_nal_header (&bs, VAAPI_ENCODER_H264_NAL_REF_IDC_HIGH,
+          picture->isIdr() ? VAAPI_ENCODER_H264_NAL_IDR : VAAPI_ENCODER_H264_NAL_NON_IDR);
+    } else if (sliceParam->slice_type == H264_SLICE_TYPE_P){
+        bit_writer_write_nal_header (&bs, VAAPI_ENCODER_H264_NAL_REF_IDC_MEDIUM,
+           VAAPI_ENCODER_H264_NAL_NON_IDR);
+    } else {
+        assert (sliceParam->slice_type == H264_SLICE_TYPE_B);
+        bit_writer_write_nal_header (&bs, picture->m_isReference ? VAAPI_ENCODER_H264_NAL_REF_IDC_LOW :
+                             VAAPI_ENCODER_H264_NAL_REF_IDC_NONE, VAAPI_ENCODER_H264_NAL_NON_IDR);
+    }
+
+      bit_writer_put_ue(&bs, sliceParam->macroblock_address); /* first_mb_in_slice*/
+      bit_writer_put_ue(&bs, sliceParam->slice_type); /* slice_type */
+
+      bit_writer_put_ue(&bs, sliceParam->pic_parameter_set_id);        /* m_picParameter_set_id: 0 */
+      bs.writeBits(m_picParam->frame_num, m_seqParam->seq_fields.bits.log2_max_frame_num_minus4 + 4); /* frame_num */
+
+      /* frame_mbs_only_flag == 1 */
+      if (!m_seqParam->seq_fields.bits.frame_mbs_only_flag) {
+          ERROR("interlace unspported");
+          return false;
+      }
+
+      if (m_picParam->pic_fields.bits.idr_pic_flag)
+          bit_writer_put_ue(&bs, sliceParam->idr_pic_id);      /* idr_pic_id: 0 */
+
+      if (m_seqParam->seq_fields.bits.pic_order_cnt_type == 0) {
+          bs.writeBits( m_picParam->CurrPic.TopFieldOrderCnt, m_seqParam->seq_fields.bits.log2_max_pic_order_cnt_lsb_minus4 + 4);
+          /* pic_order_present_flag == 0 */
+      } else {
+          ERROR("POC type unspported");
+          return false;
+      }
+
+#if 0
+      /* redundant_pic_cnt_present_flag == 0 */
+      /* slice type */
+      if (sliceParam->slice_type == H264_SLICE_TYPE_P) {
+          bs.writeBits( !!((reordering_info[0] >> 16) & 0xFF), 1);     /* num_ref_idx_active_override_flag: */
+
+          if ((reordering_info[0] >> 16) & 0xFF)
+              bit_writer_put_ue(&bs, (reordering_info[0] >> 24) & 0xFF);        /* num_ref_idx_l0_active_minus1 */
+
+          /* ref_pic_list_reordering */
+          if (!reordering_info || !(reordering_info[0] & 0x0F))
+              bs.writeBits( 0, 1);             /* ref_pic_list_reordering_flag_l0: 0 */
+          else {
+              bs.writeBits( 1, 1);             /* ref_pic_list_reordering_flag_l0: 1 */
+              bit_writer_put_ue(&bs, (reordering_info[0] >> 4) & 0x0F);
+              bit_writer_put_ue(&bs, (reordering_info[0] >> 8) & 0xFF);
+              bit_writer_put_ue(&bs, 3);                /* modification_of_pic_nums_idc: 3 */
+          }
+      } else if (sliceParam->slice_type == H264_SLICE_TYPE_B) {
+          bs.writeBits( sliceParam->direct_spatial_mv_pred_flag, 1);            /* direct_spatial_mv_pred: 1 */
+
+          bs.writeBits( ((reordering_info[0] >> 16) & 0xFF) || ((reordering_info[1] >> 16) & 0xFF) , 1);               /* num_ref_idx_active_override_flag: */
+
+          if (((reordering_info[0] >> 16) & 0xFF) || ((reordering_info[1] >> 16) & 0xFF)) {
+              bit_writer_put_ue(&bs, (reordering_info[0] >> 24) & 0xFF);        /* num_ref_idx_l0_active_minus1 */
+              bit_writer_put_ue(&bs, (reordering_info[1] >> 24) & 0xFF);        /* num_ref_idx_l0_active_minus1 */
+          }
+
+
+          /* ref_pic_list_reordering */
+
+          for (i = 0; i < 2; i++) {
+              if (!reordering_info || !(reordering_info[i] & 0x0F))
+                  bs.writeBits( 0, 1);             /* ref_pic_list_reordering_flag_l0/l1: 0 */
+              else {
+                  bs.writeBits( 1, 1);             /* ref_pic_list_reordering_flag_l0/l1: 1 */
+                  bit_writer_put_ue(&bs, (reordering_info[i] >> 4) & 0x0F);
+                  bit_writer_put_ue(&bs, (reordering_info[i] >> 8) & 0xFF);
+                  bit_writer_put_ue(&bs, 3);                /* modification_of_pic_nums_idc: 3 */
+              }
+          }
+      }
+
+#else
+
+      /* slice type */
+      if (sliceParam->slice_type == H264_SLICE_TYPE_P) {
+          bs.writeBits( sliceParam->num_ref_idx_active_override_flag, 1);            /* num_ref_idx_active_override_flag: */
+
+          if (sliceParam->num_ref_idx_active_override_flag)
+              bit_writer_put_ue(&bs, sliceParam->num_ref_idx_l0_active_minus1);
+
+          bool refPicListModificationFlagL0 = false;
+          /* ref_pic_list_reordering */
+          for (i=0; i < m_refList0.size(); i++){
+                if (m_refList0[i]->m_diffPicNumMinus1){
+                    ERROR("m_diffPicNumMinus1 is %d",  m_refList0[i]->m_diffPicNumMinus1);
+                    refPicListModificationFlagL0 = true;
+                    break;
+                }
+          }
+
+          bs.writeBits(refPicListModificationFlagL0, 1);            /* ref_pic_list_reordering_flag_l0*/
+
+          if (refPicListModificationFlagL0){
+            ERROR("m_refList0_size is %d", (int32_t)m_refList0.size());
+               for (i=0; i < m_refList0.size(); i++){
+                  bit_writer_put_ue(&bs, 0);   /* modification_of_pic_nums_idc: 0 */
+                  bit_writer_put_ue(&bs, m_refList0[i]->m_diffPicNumMinus1);/* abs_diff_pic_num_minus1 */
+              }
+              bit_writer_put_ue(&bs, 3);                /* modification_of_pic_nums_idc: 3 */
+          }
+      } else if (sliceParam->slice_type == H264_SLICE_TYPE_B) {
+          bs.writeBits( sliceParam->direct_spatial_mv_pred_flag, 1);            /* direct_spatial_mv_pred: 1 */
+
+          bs.writeBits( sliceParam->num_ref_idx_active_override_flag, 1);       /* num_ref_idx_active_override_flag: */
+
+          if (sliceParam->num_ref_idx_active_override_flag) {
+              bit_writer_put_ue(&bs, sliceParam->num_ref_idx_l0_active_minus1);
+              bit_writer_put_ue(&bs, sliceParam->num_ref_idx_l1_active_minus1);
+          }
+
+          /* ref_pic_list_reordering */
+          bs.writeBits( 0, 1);            /* ref_pic_list_reordering_flag_l0: 0 */
+          bs.writeBits( 0, 1);            /* ref_pic_list_reordering_flag_l1: 0 */
+      }
+
+#endif
+
+      if ((m_picParam->pic_fields.bits.weighted_pred_flag &&
+           sliceParam->slice_type == H264_SLICE_TYPE_P) ||
+          ((m_picParam->pic_fields.bits.weighted_bipred_idc == 1) &&
+           sliceParam->slice_type == H264_SLICE_TYPE_B)) {
+          /* FIXME: fill weight/offset table */
+          assert(0);
+      }
+
+      /* dec_ref_pic_marking */
+      if (m_picParam->pic_fields.bits.reference_pic_flag) {     /* nal_ref_idc != 0 */
+          if (m_picParam->pic_fields.bits.idr_pic_flag) {
+              bs.writeBits( 0, 1);            /* no_output_of_prior_pics_flag: 0 */
+              bs.writeBits( 0, 1);            /* long_term_reference_flag: 0 */
+          } else {
+              bs.writeBits( 0, 1);            /* adaptive_ref_pic_marking_mode_flag: 0 */
+          }
+      }
+
+      if (m_picParam->pic_fields.bits.entropy_coding_mode_flag &&
+          (sliceParam->slice_type != H264_SLICE_TYPE_I))
+          bit_writer_put_ue(&bs, sliceParam->cabac_init_idc);               /* cabac_init_idc: 0 */
+
+      bit_writer_put_se(&bs, sliceParam->slice_qp_delta);                   /* slice_qp_delta: 0 */
+
+      /* ignore for SP/SI */
+
+      if (m_picParam->pic_fields.bits.deblocking_filter_control_present_flag) {
+          bit_writer_put_ue(&bs, sliceParam->disable_deblocking_filter_idc);           /* disable_deblocking_filter_idc: 0 */
+
+          if (sliceParam->disable_deblocking_filter_idc != 1) {
+              bit_writer_put_se(&bs, sliceParam->slice_alpha_c0_offset_div2);          /* slice_alpha_c0_offset_div2: 2 */
+              bit_writer_put_se(&bs, sliceParam->slice_beta_offset_div2);              /* slice_beta_offset_div2: 2 */
+          }
+      }
+
+      if (m_picParam->pic_fields.bits.entropy_coding_mode_flag) {
+          bs.writeToBytesAligned(true);
+      }
+
+    uint8_t* codedData = bs.getBitWriterData();
+    ASSERT(codedData);
+
+    if (!picture->addPackedHeader(VAEncPackedHeaderSlice, codedData, bs.getCodedBitsCount())) {
+        ret = false;
+    }
+
+    return ret;
+}
+
 
 /* Adds slice headers to picture */
 bool VaapiEncoderH264::addSliceHeaders (const PicturePtr& picture) const
@@ -1568,7 +1768,7 @@ bool VaapiEncoderH264::addSliceHeaders (const PicturePtr& picture) const
         lastMbIndex += curSliceMbs;
 
         addPackedPrefixNalUnit(picture);
-        //addPackedSliceHeader(picture, sliceParam, i);
+        addPackedSliceHeader(picture, sliceParam, i);
     }
     assert (lastMbIndex == mbSize);
     return true;
@@ -1576,14 +1776,12 @@ bool VaapiEncoderH264::addSliceHeaders (const PicturePtr& picture) const
 
 bool VaapiEncoderH264::ensureSequence(const PicturePtr& picture)
 {
-    VAEncSequenceParameterBufferH264* seqParam;
-
-    if (!picture->editSequence(seqParam) || !fill(seqParam)) {
+    if (!picture->editSequence(m_seqParam) || !fill(m_seqParam)) {
         ERROR("failed to create sequence parameter buffer (SPS)");
         return false;
     }
 
-    if (picture->isIdr() && !ensureSequenceHeader(picture, seqParam)) {
+    if (picture->isIdr() && !ensureSequenceHeader(picture, m_seqParam)) {
         ERROR ("failed to create packed sequence header buffer");
         return false;
     }
@@ -1592,19 +1790,17 @@ bool VaapiEncoderH264::ensureSequence(const PicturePtr& picture)
 
 bool VaapiEncoderH264::ensurePicture (const PicturePtr& picture, const SurfacePtr& surface)
 {
-    VAEncPictureParameterBufferH264 *picParam;
-
     if (!pictureReferenceListSet(picture)) {
         ERROR ("reference list reorder failed");
         return false;
     }
 
-    if (!picture->editPicture(picParam) || !fill(picParam, picture, surface)) {
+    if (!picture->editPicture(m_picParam) || !fill(m_picParam, picture, surface)) {
         ERROR("failed to create picture parameter buffer (PPS)");
         return false;
     }
 
-    if (picture->isIdr() && !ensurePictureHeader (picture, picParam)) {
+    if (picture->isIdr() && !ensurePictureHeader (picture, m_picParam)) {
             ERROR ("set picture packed header failed");
             return false;
     }

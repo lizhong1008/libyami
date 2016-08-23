@@ -73,6 +73,9 @@ private:
     bool ensureSlices(const PicturePtr&);
     bool ensureCodedBufferSize();
     bool addPackedPrefixNalUnit(const PicturePtr&) const;
+    bool addPackedSliceHeader(const PicturePtr& picture,
+                                            const VAEncSliceParameterBufferH264* const sliceParam,
+                                            uint32_t sliceIndex) const;
 
     //reference list related
     YamiStatus reorder(const SurfacePtr& surface, uint64_t timeStamp, bool forceKeyFrame);
@@ -127,6 +130,10 @@ private:
     uint32_t m_maxPicOrderCnt;
     uint32_t m_log2MaxPicOrderCnt;
     uint16_t m_idrNum; //used to set idr_pic_id, max value is 65535 as spec
+
+    VAEncSequenceParameterBufferH264* m_seqParam;
+    VAEncPictureParameterBufferH264* m_picParam;
+
 
     StreamHeaderPtr m_headers;
     Lock m_paramLock; // locker for parameters update, for example: m_sps/m_pps/m_maxCodedbufSize (width/height etc)

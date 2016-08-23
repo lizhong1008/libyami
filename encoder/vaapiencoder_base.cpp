@@ -30,7 +30,7 @@
 #include "vaapi/vaapisurfaceallocator.h"
 #include "vaapi/VaapiUtils.h"
 
-const uint32_t MaxOutputBuffer=5;
+const uint32_t MaxOutputBuffer=16;
 namespace YamiMediaCodec{
 VaapiEncoderBase::VaapiEncoderBase():
     m_entrypoint(VAEntrypointEncSlice),
